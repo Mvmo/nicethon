@@ -1,0 +1,11 @@
+[package]
+name = "nicethon"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "nicethon"
+path = "src/main.rs"
+
+[profile.release]
+debug = false
