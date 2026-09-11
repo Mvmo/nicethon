@@ -55,3 +55,17 @@ The language is described in [spec/semantics.md](spec/semantics.md) and
 [tests/golden/run](tests/golden/run) show every feature with its expected
 output.
 
+## Decisions
+
+| Topic | Decision |
+|---|---|
+| Backend | C against the CPython C API, compiled to an extension module. Runs inside a normal CPython process. |
+| Syntax | Braces, `;` after every statement. The last expression of a block without `;` is the block's value (like Rust). |
+| Imports | TypeScript style: `import py * as np from "numpy";`, `import py { sqrt, pi as PI } from "math";`, `import { Point } from "./geometry";` |
+| Python values | Type `Dyn`. Usable like in Python, never implicitly converted to a static type. `as!` checks and throws `TypeError`, `as?` checks and returns `Option`. |
+| Errors | Own code: `Result<T, E>` and `?`. Python exceptions: `try { } catch (error: ValueError) { } finally { }`, `throw`, and `try expr` which gives `Result<T, PyErr>`. |
+| Containers at the boundary | Passed by reference. Nicethon lists are native objects. Python sees them as sequences, and numpy wraps `List<Int>` and `List<Float>` without copying (buffer protocol). |
+| Lambdas | Thick arrow: `value => value * 2`, `(left, right) => left + right`, block bodies allowed. Python sees a normal callable. |
+| Values | `Int`, `Float` and `Bool` are plain C values (`int64_t`, `double`, `int`). Structs and enum variants are immutable records with native fields. |
+| Python types | `lib/bindings.nice` declares types for a part of the stdlib. Other modules are `Dyn`. |
+| Compiler | Rust, no dependencies. Prelude, bindings and C runtime are embedded in the binary. |
