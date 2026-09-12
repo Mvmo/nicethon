@@ -427,4 +427,146 @@ impl Parser {
         }
         Ok(PyClassDecl { name, bases, fields, methods })
     }
+
+    // Types:
+
+    fn ty(&mut self) -> PResult<TypeExpr> {
+        let pos = self.pos();
+        if self.eat("(") {
+            let items = self.comma_list(")", Self::ty)?;
+            let trailing_comma = matches!(self.tokens[self.at - 2].tok, Tok::Sym(","));
+            if self.eat("->") {
+                return Ok(TypeExpr::Fn(items, Box::new(self.ty()?), pos));
+            }
+            if items.len() == 1 && !trailing_comma {
+                return Ok(items.into_iter().next().unwrap());
+            }
+            return Ok(TypeExpr::Tuple(items, pos));
+        }
+        let mut path = vec![if self.eat("Self") { "Self".to_string() } else { self.ident()? }];
+        while self.eat(".") {
+            path.push(self.ident()?);
+        }
+        let args = if self.eat("<") { self.comma_list(">", Self::ty)? } else { vec![] };
+        Ok(TypeExpr::Path(path, args, pos))
+    }
+
+
+    // Statements:
+
+    fn block(&mut self) -> PResult<Block> {
+        let pos = self.pos();
+        self.expect("{")?;
+        let mut stmts = vec![];
+        let mut tail = None;
+        while !self.is("}") && !matches!(self.peek(), Tok::Eof) {
+            let start = self.at;
+            match self.stmt() {
+                Ok(Parsed::Stmt(stmt)) => stmts.push(stmt),
+                Ok(Parsed::Tail(expr)) => tail = Some(Box::new(expr)),
+                Err(()) => {
+                    self.sync();
+                    if self.at == start {
+                        self.next();
+                    }
+                }
+            }
+        }
+        self.expect("}")?;
+        Ok(Block { stmts, tail, pos })
+    }
+
+    fn stmt(&mut self) -> PResult<Parsed> {
+        let pos = self.pos();
+        let stmt = match self.peek() {
+            Tok::Kw("let") => {
+                self.next();
+                let pattern = self.pattern(false)?;
+                let ty = if self.eat(":") { Some(self.ty()?) } else { None };
+                self.expect("=")?;
+                let value = self.expr()?;
+                self.expect_semicolon();
+                Stmt::Let(pattern, ty, value)
+            }
+            Tok::Kw("var") => {
+                self.next();
+                let name = self.ident()?;
+                let ty = if self.eat(":") { Some(self.ty()?) } else { None };
+                self.expect("=")?;
+                let value = self.expr()?;
+                self.expect_semicolon();
+                Stmt::Var(name, ty, value)
+            }
+            Tok::Kw("try") if matches!(self.peek_at(1), Tok::Sym("{")) => {
+                self.next();
+                let body = self.block()?;
+                let mut catches = vec![];
+                while self.eat("catch") {
+                    self.expect("(")?;
+                    let name = self.ident()?;
+                    let mut filters = vec![];
+                    if self.eat(":") {
+                        filters.push(self.postfix()?);
+                        while self.eat("|") {
+                            filters.push(self.postfix()?);
+                        }
+                    }
+                    self.expect(")")?;
+                    catches.push(Catch { name, filters, body: self.block()? });
+                }
+                let finally = if self.eat("finally") { Some(self.block()?) } else { None };
+                Stmt::Try(body, catches, finally, pos)
+            }
+            Tok::Kw("with") => {
+                self.next();
+                let mut items = vec![];
+                loop {
+                    let manager = self.binary(0, true)?;
+                    let name = if self.eat("as") { Some((self.ident()?, self.tokens[self.at - 1].pos)) } else { None };
+                    items.push((manager, name));
+                    if !self.eat(",") {
+                        break;
+                    }
+                }
+                Stmt::With(items, self.block()?, pos)
+            }
+            Tok::Kw("fn") | Tok::Kw("struct") | Tok::Kw("enum") | Tok::Kw("trait") | Tok::Kw("impl")
+            | Tok::Kw("const") | Tok::Kw("type") | Tok::Sym("@") => Stmt::Item(self.item()?),
+            Tok::Kw("async") if matches!(self.peek_at(1), Tok::Kw("fn")) => Stmt::Item(self.item()?),
+            Tok::Sym(";") => {
+                self.next();
+                Stmt::Expr(Expr { kind: ExprKind::Unit, pos })
+            }
+            Tok::Kw("if") | Tok::Kw("match") | Tok::Kw("while") | Tok::Kw("for") | Tok::Kw("loop") | Tok::Sym("{") => {
+                let expr = self.primary()?;
+                if self.is("}") {
+                    return Ok(Parsed::Tail(expr));
+                }
+                self.eat(";");
+                Stmt::Expr(expr)
+            }
+            _ => {
+                let expr = self.expr()?;
+                let compound = match self.peek() {
+                    Tok::Sym(sym) if sym.len() >= 2 && sym.ends_with('=') && !matches!(*sym, "==" | "!=" | "<=" | ">=") => {
+                        binop_of(&sym[..sym.len() - 1])
+                    }
+                    _ => None,
+                };
+                if self.is("=") || compound.is_some() {
+                    let pos = self.pos();
+                    self.next();
+                    let value = self.expr()?;
+                    self.expect_semicolon();
+                    Stmt::Assign(expr, compound, value, pos)
+                } else if self.is("}") {
+                    return Ok(Parsed::Tail(expr));
+                } else {
+                    self.expect_semicolon();
+                    Stmt::Expr(expr)
+                }
+            }
+        };
+        Ok(Parsed::Stmt(stmt))
+    }
 }
