@@ -962,4 +962,97 @@ impl Parser {
         }
         Ok(pieces)
     }
+
+    // Patterns:
+
+    fn pattern(&mut self, type_tests: bool) -> PResult<Pattern> {
+        let pos = self.pos();
+        let first = self.pattern_alt(type_tests)?;
+        if !self.is("|") {
+            return Ok(first);
+        }
+        let mut alternatives = vec![first];
+        while self.eat("|") {
+            alternatives.push(self.pattern_alt(type_tests)?);
+        }
+        Ok(Pattern { kind: PatKind::Or(alternatives), pos })
+    }
+
+    fn pattern_alt(&mut self, type_tests: bool) -> PResult<Pattern> {
+        let pos = self.pos();
+        let kind = match self.peek().clone() {
+            Tok::Ident(name) if name == "_" => {
+                self.next();
+                PatKind::Wild
+            }
+            Tok::Int(_) | Tok::Float(_) | Tok::Str(_) | Tok::Kw("true") | Tok::Kw("false") => PatKind::Lit(Box::new(self.primary()?)),
+            Tok::Sym("-") => {
+                self.next();
+                let literal = self.primary()?;
+                PatKind::Lit(Box::new(Expr { kind: ExprKind::Unary(UnOp::Neg, Box::new(literal)), pos }))
+            }
+            Tok::Sym("(") => {
+                self.next();
+                let items = self.comma_list(")", |p| p.sub_pattern(type_tests))?;
+                let trailing_comma = matches!(self.tokens[self.at - 2].tok, Tok::Sym(","));
+                if items.len() == 1 && !trailing_comma {
+                    if let SubPat::Pat(inner) = &items[0] {
+                        return Ok(inner.clone());
+                    }
+                }
+                PatKind::Tuple(items)
+            }
+            Tok::Sym("[") => {
+                self.next();
+                PatKind::List(self.comma_list("]", |p| p.sub_pattern(type_tests))?)
+            }
+            Tok::Ident(name) => {
+                self.next();
+                if type_tests && self.eat(":") {
+                    return Ok(Pattern { kind: PatKind::TypeTest(name, self.ty()?), pos });
+                }
+                let mut path = vec![name];
+                while self.eat(".") {
+                    path.push(self.ident()?);
+                }
+                if self.eat("(") {
+                    PatKind::Ctor(path, self.comma_list(")", |p| p.sub_pattern(type_tests))?)
+                } else if path.len() == 1 {
+                    PatKind::Ident(path.pop().unwrap())
+                } else {
+                    PatKind::Ctor(path, vec![])
+                }
+            }
+            other => return self.error(pos, format!("expected pattern, found {}", Self::describe(&other))),
+        };
+        Ok(Pattern { kind, pos })
+    }
+
+    fn sub_pattern(&mut self, type_tests: bool) -> PResult<SubPat> {
+        if self.eat("..") {
+            return Ok(SubPat::Rest);
+        }
+        if let (Tok::Ident(name), Tok::Sym("=")) = (self.peek().clone(), self.peek_at(1)) {
+            self.next();
+            self.next();
+            return Ok(SubPat::Named(name, self.pattern(type_tests)?));
+        }
+        Ok(SubPat::Pat(self.pattern(type_tests)?))
+    }
+}
+
+enum Parsed {
+    Stmt(Stmt),
+    Tail(Expr),
+}
+
+fn binop_of(sym: &str) -> Option<BinOp> {
+    use BinOp::*;
+    Some(match sym {
+        "+" => Add, "-" => Sub, "*" => Mul, "/" => Div, "~/" => FloorDiv, "%" => Mod, "**" => Pow, "@" => MatMul,
+        "&" => BitAnd, "|" => BitOr, "^" => BitXor, "<<" => Shl, ">>" => Shr,
+        "==" => Eq, "!=" => Ne, "<" => Lt, "<=" => Le, ">" => Gt, ">=" => Ge, "in" => In,
+        "&&" => And, "||" => Or,
+        _ => return None,
+    })
 }
