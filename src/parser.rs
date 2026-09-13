@@ -126,6 +126,28 @@ impl Parser {
         Ok(items)
     }
 
+    fn sync(&mut self) {
+        let mut depth = 0;
+        loop {
+            match self.peek() {
+                Tok::Eof => return,
+                Tok::Sym("{") | Tok::Sym("(") | Tok::Sym("[") => depth += 1,
+                Tok::Sym("}") | Tok::Sym(")") | Tok::Sym("]") => {
+                    if depth == 0 {
+                        return;
+                    }
+                    depth -= 1;
+                }
+                Tok::Sym(";") if depth == 0 => {
+                    self.next();
+                    return;
+                }
+                _ => {}
+            }
+            self.next();
+        }
+    }
+
     // Module level:
 
     fn module(&mut self) -> Module {
