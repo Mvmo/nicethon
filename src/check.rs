@@ -267,4 +267,350 @@ impl Checker {
             }
         }
     }
+
+    // Signatures:
+
+    fn signature(&mut self, item: &ast::Item, declared: Option<DefId>) {
+        let def = declared.unwrap_or(0);
+        match &item.kind {
+            ast::ItemKind::Fn(decl) => {
+                let ctx = self.generic_context(&decl.generics, vec![], vec![], None);
+                let kind = if decl.body.is_some() { FnKind::Native } else { FnKind::Intrinsic };
+                self.add_fn(Some(def), decl, ctx, None, kind, item);
+            }
+            ast::ItemKind::Struct(decl) => {
+                let generics: Vec<String> = decl.generics.iter().map(|g| g.name.clone()).collect();
+                let fields = self.fields(&decl.fields, &generics, def);
+                self.defs[def].kind = DefKind::Struct { generics, fields };
+            }
+            ast::ItemKind::Enum(decl) => {
+                let DefKind::Enum { generics, variants } = self.defs[def].kind.clone() else { unreachable!() };
+                let ctx = FnContext { generics: generics.clone(), ..Default::default() };
+                for (variant, id) in decl.variants.iter().zip(variants) {
+                    let fields = variant.fields.iter().map(|(name, ty)| Field { name: name.clone(), ty: self.resolve_type(ty, &ctx), default: None }).collect();
+                    self.defs[id].kind = DefKind::Variant { parent: def, fields };
+                }
+            }
+            ast::ItemKind::Trait(decl) => {
+                let mut generics = vec!["Self".to_string()];
+                generics.extend(decl.generics.iter().map(|g| g.name.clone()));
+                let mut bounds = vec![vec![]; generics.len()];
+                bounds[0].push((def, (1..generics.len() as u32).map(Ty::Param).collect()));
+                let mut methods = vec![];
+                for method in &decl.methods {
+                    let ctx = self.generic_context(&method.generics, generics.clone(), bounds.clone(), Some(Ty::Param(0)));
+                    let kind = if method.body.is_some() { FnKind::Native } else { FnKind::TraitMethod };
+                    let id = self.add_fn(None, method, ctx, Some(def), kind, item);
+                    methods.push((method.name.clone(), id));
+                }
+                self.defs[def].kind = DefKind::Trait { methods, generics: decl.generics.len() };
+            }
+            ast::ItemKind::Impl(decl) => self.impl_block(decl),
+            ast::ItemKind::Const(name, ty, value) => {
+                let ty = self.resolve_type(ty, &FnContext::default());
+                self.empty_fn_state();
+                let value = self.check_expr(value, Some(&ty));
+                let value = self.coerce(value, &ty);
+                let global = self.add_global(ty.clone(), GlobalInit::Value(value), item.pos);
+                self.scopes[self.module].insert(name.clone(), Binding::Global(global));
+                self.defs[def].kind = DefKind::Alias(vec![], ty);
+            }
+            ast::ItemKind::TypeAlias(_, generics, ty) => {
+                let names: Vec<String> = generics.iter().map(|g| g.name.clone()).collect();
+                let ctx = FnContext { generics: names.clone(), ..Default::default() };
+                let ty = self.resolve_type(ty, &ctx);
+                self.defs[def].kind = DefKind::Alias(names, ty);
+            }
+            ast::ItemKind::Extern(module, items) => {
+                for extern_item in items {
+                    match extern_item {
+                        ast::ExternItem::Fn(decl) => {
+                            let def = self.externs[module][&decl.name];
+                            let ctx = self.generic_context(&decl.generics, vec![], vec![], None);
+                            self.add_fn(Some(def), decl, ctx, None, FnKind::PyFunction, item);
+                        }
+                        ast::ExternItem::Const(name, ty) => {
+                            let def = self.externs[module][name];
+                            let ty = self.resolve_type(ty, &FnContext::default());
+                            self.defs[def].kind = DefKind::Alias(vec![], ty);
+                        }
+                        ast::ExternItem::Type(decl) => self.extern_type(self.externs[module][&decl.name], decl, item),
+                    }
+                }
+            }
+            ast::ItemKind::PyClass(decl) => {
+                let self_ty = Ty::Named(def, vec![]);
+                let fields = self.fields(&decl.fields, &[], def);
+                let mut methods = vec![];
+                for method in &decl.methods {
+                    let ast::ItemKind::Fn(fn_decl) = &method.kind else {
+                        self.error(method.pos, "only methods and fields are allowed in a py class");
+                        continue;
+                    };
+                    let mut ctx = self.generic_context(&fn_decl.generics, vec![], vec![], Some(self_ty.clone()));
+                    ctx.class = Some(def);
+                    let id = self.add_fn(None, fn_decl, ctx, Some(def), FnKind::Native, method);
+                    methods.push((fn_decl.name.clone(), id));
+                }
+                self.empty_fn_state();
+                let bases: Vec<Expr> = decl.bases.iter().map(|base| {
+                    let base = self.check_expr(base, None);
+                    self.dynamic(base)
+                }).collect();
+                if let DefKind::PyClass { fields: f, methods: m, bases: b, .. } = &mut self.defs[def].kind {
+                    (*f, *m, *b) = (fields, methods, bases);
+                }
+            }
+        }
+    }
+
+    fn fields(&mut self, fields: &[ast::Field], generics: &[String], def: DefId) -> Vec<Field> {
+        let ctx = FnContext { generics: generics.to_vec(), ..Default::default() };
+        let mut result = vec![];
+        for (index, field) in fields.iter().enumerate() {
+            if let Some(default) = &field.default {
+                self.defaults.push((def, index, default.clone()));
+            }
+            result.push(Field { name: Some(field.name.clone()), ty: self.resolve_type(&field.ty, &ctx), default: None });
+        }
+        result
+    }
+
+    fn extern_type(&mut self, def: DefId, decl: &ast::ExternType, item: &ast::Item) {
+        let generics: Vec<String> = decl.generics.iter().map(|g| g.name.clone()).collect();
+        self.defs[def].kind = DefKind::ExternType { generics: generics.clone(), attrs: vec![], methods: vec![], bases: vec![] };
+        let self_ty = Ty::Named(def, (0..generics.len() as u32).map(Ty::Param).collect());
+        let ctx = FnContext { generics: generics.clone(), bounds: vec![vec![]; generics.len()], self_ty: Some(self_ty.clone()), class: None };
+        let bases = decl.bases.iter().map(|b| self.resolve_type(b, &ctx)).collect();
+        let attrs = decl.attrs.iter().map(|(n, t)| (n.clone(), self.resolve_type(t, &ctx))).collect();
+        let mut methods = vec![];
+        for method in &decl.methods {
+            let ctx = self.generic_context(&method.generics, generics.clone(), vec![vec![]; generics.len()], Some(self_ty.clone()));
+            methods.push((method.name.clone(), self.add_fn(None, method, ctx, Some(def), FnKind::PyMethod, item)));
+        }
+        self.defs[def].kind = DefKind::ExternType { generics, attrs, methods, bases };
+    }
+
+    fn add_fn(&mut self, def: Option<DefId>, decl: &ast::FnDecl, ctx: FnContext, owner: Option<DefId>, kind: FnKind, item: &ast::Item) -> DefId {
+        let sig = self.fn_sig(decl, &ctx, owner, kind);
+        let def = match def {
+            Some(def) => {
+                self.defs[def].kind = DefKind::Fn(sig);
+                def
+            }
+            None => self.add_def(&decl.name, item.export, DefKind::Fn(sig)),
+        };
+        for (index, param) in decl.params.iter().enumerate() {
+            if let Some(default) = &param.default {
+                self.defaults.push((def, index, default.clone()));
+            }
+        }
+        let generic = !self.sig(def).generics.is_empty();
+        if generic && (item.export || !item.decorators.is_empty()) {
+            self.error(decl.pos, "generic functions cannot be exported or decorated");
+        }
+        if decl.body.is_some() {
+            self.bodies.push((def, decl.clone(), ctx));
+        }
+        if !item.decorators.is_empty() && matches!(item.kind, ast::ItemKind::Fn(_)) {
+            self.empty_fn_state();
+            let mut decorators = vec![];
+            let mut ty = self.fn_type(def);
+            for decorator in item.decorators.iter().rev() {
+                let value = self.check_expr(decorator, None);
+                ty = self.decorated_type(&value, ty, decorator.pos);
+                decorators.push(value);
+            }
+            let global = self.add_global(ty, GlobalInit::Decorated(def, decorators), item.pos);
+            self.scopes[self.module].insert(decl.name.clone(), Binding::Global(global));
+        }
+        def
+    }
+
+    fn decorated_type(&mut self, decorator: &Expr, input: Ty, pos: Pos) -> Ty {
+        let ExprKind::Global(global) = decorator.kind else { return Ty::Dyn };
+        let binding = self.scopes[self.module].values().find(|b| matches!(b, Binding::TypedPy(g, _) if *g == global)).cloned();
+        let Some(Binding::TypedPy(_, def)) = binding else { return Ty::Dyn };
+        let DefKind::Fn(sig) = self.defs[def].kind.clone() else { return Ty::Dyn };
+        let (params, ret, _) = self.instantiate(&sig);
+        if params.len() != 1 || !self.unify(&params[0], &input) {
+            self.error(pos, "decorator does not accept this function");
+        }
+        self.deep(&ret)
+    }
+
+    fn generic_context(&mut self, generics: &[ast::Generic], outer: Vec<String>, outer_bounds: Vec<Vec<Bound>>, self_ty: Option<Ty>) -> FnContext {
+        let mut ctx = FnContext { generics: outer, bounds: outer_bounds, self_ty, class: None };
+        ctx.bounds.resize(ctx.generics.len(), vec![]);
+        ctx.generics.extend(generics.iter().map(|g| g.name.clone()));
+        // Bounds may name generics declared after them: <I: Iterator<T>, T>.
+        let bounds: Vec<Vec<Bound>> = generics.iter().map(|g| g.bounds.iter().filter_map(|b| self.resolve_bound(b, &ctx)).collect()).collect();
+        ctx.bounds.extend(bounds);
+        ctx
+    }
+
+    fn resolve_bound(&mut self, ty: &ast::TypeExpr, ctx: &FnContext) -> Option<Bound> {
+        if let ast::TypeExpr::Path(path, args, pos) = ty {
+            if let Some(Binding::Def(def)) = self.lookup(&path[0]) {
+                if matches!(self.defs[def].kind, DefKind::Trait { .. }) {
+                    let args = args.iter().map(|arg| self.resolve_type(arg, ctx)).collect();
+                    return Some((def, args));
+                }
+            }
+            self.error(*pos, format!("{} is not a trait", path.join(".")));
+        }
+        None
+    }
+
+    fn fn_sig(&mut self, decl: &ast::FnDecl, ctx: &FnContext, owner: Option<DefId>, kind: FnKind) -> FnSig {
+        let mut params = vec![];
+        for param in &decl.params {
+            let ty = match (&param.ty, param.kind) {
+                (_, ast::ParamKind::SelfParam) => ctx.self_ty.clone().unwrap_or_else(|| {
+                    self.error(param.pos, "self is only allowed in methods");
+                    Ty::Error
+                }),
+                (Some(ty), _) => self.resolve_type(ty, ctx),
+                (None, _) => Ty::Error,
+            };
+            let python = matches!(kind, FnKind::PyFunction | FnKind::PyMethod);
+            if (param.optional || matches!(param.kind, ast::ParamKind::Star | ast::ParamKind::StarStar)) && !python {
+                self.error(param.pos, "optional and spread parameters are only allowed in extern blocks");
+            }
+            params.push(Param { name: param.name.clone(), ty, default: None, optional: param.optional, kind: param.kind });
+        }
+        let ret = decl.ret.as_ref().map_or(Ty::Unit, |ty| self.resolve_type(ty, ctx));
+        let generics = ctx.generics.iter().cloned().zip(ctx.bounds.iter().cloned()).collect();
+        FnSig { generics, params, ret, is_async: decl.is_async, kind, owner }
+    }
+
+    fn impl_block(&mut self, decl: &ast::ImplDecl) {
+        let names: Vec<String> = decl.generics.iter().map(|g| g.name.clone()).collect();
+        let base = self.generic_context(&decl.generics, vec![], vec![], None);
+        let target = self.resolve_type(&decl.target, &base);
+        let (trait_def, trait_args) = match decl.trait_name.as_ref().and_then(|t| self.resolve_bound(t, &base)) {
+            Some((def, args)) => (Some(def), args),
+            None => (None, vec![]),
+        };
+        let mut methods = vec![];
+        for item in &decl.methods {
+            let ast::ItemKind::Fn(fn_decl) = &item.kind else {
+                self.error(item.pos, "only methods are allowed in impl blocks");
+                continue;
+            };
+            let ctx = self.generic_context(&fn_decl.generics, names.clone(), base.bounds.clone(), Some(target.clone()));
+            let kind = if fn_decl.body.is_some() { FnKind::Native } else { FnKind::Intrinsic };
+            methods.push((fn_decl.name.clone(), self.add_fn(None, fn_decl, ctx, None, kind, item)));
+        }
+        if let Some(trait_def) = trait_def {
+            let DefKind::Trait { methods: required, .. } = self.defs[trait_def].kind.clone() else { unreachable!() };
+            for (name, method) in required {
+                if self.sig(method).kind == FnKind::TraitMethod && !methods.iter().any(|(m, _)| *m == name) {
+                    self.error(decl.target.pos(), format!("missing trait method {name}"));
+                }
+            }
+        }
+        self.impls.push(Impl { trait_def, trait_args, target, generics: names.len(), methods });
+    }
+
+    pub fn resolve_type(&mut self, ty: &ast::TypeExpr, ctx: &FnContext) -> Ty {
+        let (path, args, pos) = match ty {
+            ast::TypeExpr::Tuple(items, _) if items.is_empty() => return Ty::Unit,
+            ast::TypeExpr::Tuple(items, _) => return Ty::Tuple(items.iter().map(|t| self.resolve_type(t, ctx)).collect()),
+            ast::TypeExpr::Fn(params, ret, _) => {
+                let params = params.iter().map(|t| self.resolve_type(t, ctx)).collect();
+                return Ty::Fn(params, Box::new(self.resolve_type(ret, ctx)));
+            }
+            ast::TypeExpr::Path(path, args, pos) => (path, args, *pos),
+        };
+        let args: Vec<Ty> = args.iter().map(|t| self.resolve_type(t, ctx)).collect();
+        let name = path.join(".");
+        let with_arity = |checker: &mut Self, expected: usize, make: &dyn Fn(&[Ty]) -> Ty| {
+            if args.len() == expected {
+                make(&args)
+            } else {
+                checker.error(pos, format!("{name} expects {expected} type arguments"));
+                Ty::Error
+            }
+        };
+        if path.len() == 1 {
+            if let Some(index) = ctx.generics.iter().position(|g| *g == path[0]) {
+                return Ty::Param(index as u32);
+            }
+            match path[0].as_str() {
+                "Int" => return Ty::Int,
+                "Float" => return Ty::Float,
+                "Bool" => return Ty::Bool,
+                "Str" => return Ty::Str,
+                "Bytes" => return Ty::Bytes,
+                "BigInt" => return Ty::BigInt,
+                "Dyn" => return Ty::Dyn,
+                "Never" => return Ty::Never,
+                "Self" => return ctx.self_ty.clone().unwrap_or(Ty::Error),
+                "List" => return with_arity(self, 1, &|a| Ty::List(Box::new(a[0].clone()))),
+                "Set" => return with_arity(self, 1, &|a| Ty::Set(Box::new(a[0].clone()))),
+                "Coroutine" => return with_arity(self, 1, &|a| Ty::Coroutine(Box::new(a[0].clone()))),
+                "Map" => return with_arity(self, 2, &|a| Ty::Map(Box::new(a[0].clone()), Box::new(a[1].clone()))),
+                _ => {}
+            }
+        }
+        let def = match (self.lookup(&path[0]), path.len()) {
+            (Some(Binding::Def(def) | Binding::TypedPy(_, def)), 1) => Some(def),
+            (Some(Binding::NiceModule(module)), 2) => match self.scopes[module].get(&path[1]) {
+                Some(Binding::Def(def)) if self.defs[*def].export => Some(*def),
+                _ => None,
+            },
+            (Some(Binding::PyModule(_, module)), 2) => self.externs.get(&module).and_then(|names| names.get(&path[1]).copied()),
+            _ => None,
+        };
+        let Some(def) = def else {
+            self.error(pos, format!("unknown type {name}"));
+            return Ty::Error;
+        };
+        match &self.defs[def].kind {
+            DefKind::Struct { generics, .. } | DefKind::Enum { generics, .. } | DefKind::ExternType { generics, .. } => {
+                let count = generics.len();
+                with_arity(self, count, &|a| Ty::Named(def, a.to_vec()))
+            }
+            DefKind::PyClass { .. } | DefKind::Placeholder => Ty::Named(def, args),
+            DefKind::Alias(generics, ty) => {
+                let (count, ty) = (generics.len(), ty.clone());
+                with_arity(self, count, &|a| ty.subst(a))
+            }
+            _ => {
+                self.error(pos, format!("{name} is not a type"));
+                Ty::Error
+            }
+        }
+    }
+
+    // Bodies:
+
+    fn bodies(&mut self) {
+        for (def, decl, ctx) in std::mem::take(&mut self.bodies) {
+            self.module = self.defs[def].module;
+            let sig = self.sig(def).clone();
+            self.f = FnState {
+                owners: vec![0],
+                scopes: vec![HashMap::new()],
+                rets: vec![sig.ret.clone()],
+                generics: ctx.generics,
+                bounds: ctx.bounds,
+                self_ty: ctx.self_ty,
+                class: ctx.class,
+                is_async: sig.is_async,
+                ..Default::default()
+            };
+            let params = decl.params.iter().zip(&sig.params).map(|(param, info)| self.declare_local(&param.name, info.ty.clone(), param.var)).collect();
+            let body = self.check_block(decl.body.as_ref().unwrap(), Some(&sig.ret));
+            let body = if sig.ret == Ty::Unit { body } else { self.coerce(body, &sig.ret) };
+            for (ty, pos, name) in std::mem::take(&mut self.f.infer) {
+                if matches!(self.deep(&ty), Ty::Var(_)) {
+                    self.error(pos, format!("cannot infer type of lambda parameter {name}"));
+                }
+            }
+            let state = std::mem::take(&mut self.f);
+            self.fns.push(FnBody { def, params, locals: state.locals, lambdas: state.lambdas, body });
+        }
+    }
 }
