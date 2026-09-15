@@ -613,4 +613,129 @@ impl Checker {
             self.fns.push(FnBody { def, params, locals: state.locals, lambdas: state.lambdas, body });
         }
     }
+
+    // Types:
+
+    pub fn sig(&self, def: DefId) -> &FnSig {
+        match &self.defs[def].kind {
+            DefKind::Fn(sig) => sig,
+            _ => panic!("not a function: {}", self.defs[def].name),
+        }
+    }
+
+    pub fn fields_of(&self, def: DefId) -> &[Field] {
+        match &self.defs[def].kind {
+            DefKind::Struct { fields, .. } | DefKind::Variant { fields, .. } | DefKind::PyClass { fields, .. } => fields,
+            _ => &[],
+        }
+    }
+
+    pub fn fn_type(&mut self, def: DefId) -> Ty {
+        let sig = self.sig(def).clone();
+        let (params, ret, _) = self.instantiate(&sig);
+        let ret = if sig.is_async { Ty::Coroutine(Box::new(ret)) } else { ret };
+        Ty::Fn(params, Box::new(ret))
+    }
+
+    pub fn fresh(&mut self) -> Ty {
+        self.subst.push(None);
+        Ty::Var(self.subst.len() as u32 - 1)
+    }
+
+    pub fn instantiate(&mut self, sig: &FnSig) -> (Vec<Ty>, Ty, Vec<Ty>) {
+        let args: Vec<Ty> = sig.generics.iter().map(|_| self.fresh()).collect();
+        let params = sig.params.iter().map(|p| p.ty.subst(&args)).collect();
+        (params, sig.ret.subst(&args), args)
+    }
+
+    pub fn shallow(&self, ty: &Ty) -> Ty {
+        match ty {
+            Ty::Var(var) => match &self.subst[*var as usize] {
+                Some(bound) => self.shallow(bound),
+                None => ty.clone(),
+            },
+            _ => ty.clone(),
+        }
+    }
+
+    pub fn deep(&self, ty: &Ty) -> Ty {
+        ty.map(&mut |ty| match ty {
+            Ty::Var(var) => self.subst[*var as usize].as_ref().map(|bound| self.deep(bound)),
+            _ => None,
+        })
+    }
+
+    pub fn unify(&mut self, left: &Ty, right: &Ty) -> bool {
+        let (left, right) = (self.shallow(left), self.shallow(right));
+        match (&left, &right) {
+            (Ty::Error, _) | (_, Ty::Error) | (Ty::Never, _) | (_, Ty::Never) => true,
+            (Ty::Var(a), Ty::Var(b)) if a == b => true,
+            (Ty::Var(var), other) | (other, Ty::Var(var)) => {
+                self.subst[*var as usize] = Some(other.clone());
+                true
+            }
+            (Ty::List(a), Ty::List(b)) | (Ty::Set(a), Ty::Set(b)) | (Ty::Coroutine(a), Ty::Coroutine(b)) => self.unify(a, b),
+            (Ty::Map(a, b), Ty::Map(c, d)) => self.unify(a, c) && self.unify(b, d),
+            (Ty::Tuple(a), Ty::Tuple(b)) => a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.unify(x, y)),
+            (Ty::Fn(a, r), Ty::Fn(b, s)) => a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.unify(x, y)) && self.unify(r, s),
+            (Ty::Named(a, x), Ty::Named(b, y)) => a == b && x.len() == y.len() && x.iter().zip(y).all(|(p, q)| self.unify(p, q)),
+            _ => left == right,
+        }
+    }
+
+    pub fn show(&self, ty: &Ty) -> String {
+        let list = |items: &[Ty]| items.iter().map(|t| self.show(t)).collect::<Vec<_>>().join(", ");
+        match self.shallow(ty) {
+            Ty::Int => "Int".into(),
+            Ty::Float => "Float".into(),
+            Ty::Bool => "Bool".into(),
+            Ty::Str => "Str".into(),
+            Ty::Bytes => "Bytes".into(),
+            Ty::BigInt => "BigInt".into(),
+            Ty::Unit => "()".into(),
+            Ty::Never => "Never".into(),
+            Ty::Dyn => "Dyn".into(),
+            Ty::Error | Ty::Var(_) => "_".into(),
+            Ty::List(item) => format!("List<{}>", self.show(&item)),
+            Ty::Set(item) => format!("Set<{}>", self.show(&item)),
+            Ty::Coroutine(item) => format!("Coroutine<{}>", self.show(&item)),
+            Ty::Map(key, value) => format!("Map<{}, {}>", self.show(&key), self.show(&value)),
+            Ty::Tuple(items) => format!("({})", list(&items)),
+            Ty::Fn(params, ret) => format!("({}) -> {}", list(&params), self.show(&ret)),
+            Ty::Named(def, args) if args.is_empty() => self.defs[def].name.clone(),
+            Ty::Named(def, args) => format!("{}<{}>", self.defs[def].name, list(&args)),
+            Ty::Param(index) => self.f.generics.get(index as usize).cloned().unwrap_or_else(|| format!("T{index}")),
+        }
+    }
+
+    pub fn implements(&self, ty: &Ty, trait_def: DefId) -> bool {
+        let ty = self.shallow(ty);
+        let name = self.defs[trait_def].name.as_str();
+        let builtin = self.builtins.get(name) == Some(&trait_def);
+        let comparable = matches!(ty, Ty::Int | Ty::Float | Ty::Str | Ty::Bool | Ty::BigInt | Ty::Bytes);
+        match &ty {
+            Ty::Var(_) | Ty::Error | Ty::Never => true,
+            Ty::Param(index) => self.f.bounds.get(*index as usize).is_some_and(|b| b.iter().any(|(t, _)| *t == trait_def)) || (builtin && name != "Ord"),
+            _ if builtin && (name != "Ord" || comparable) => true,
+            _ => self.impls.iter().any(|imp| imp.trait_def == Some(trait_def) && same_head(&imp.target, &ty)),
+        }
+    }
+}
+
+pub fn same_head(a: &Ty, b: &Ty) -> bool {
+    match (a, b) {
+        (Ty::Named(x, _), Ty::Named(y, _)) => x == y,
+        _ => std::mem::discriminant(a) == std::mem::discriminant(b),
+    }
+}
+
+impl Checker {
+    pub fn resolve_here(&mut self, ty: &ast::TypeExpr) -> Ty {
+        let ctx = FnContext { generics: self.f.generics.clone(), bounds: self.f.bounds.clone(), self_ty: self.f.self_ty.clone(), class: self.f.class };
+        self.resolve_type(ty, &ctx)
+    }
+
+    pub fn builtin_ty(&self, name: &str, args: Vec<Ty>) -> Ty {
+        Ty::Named(self.builtins[name], args)
+    }
 }
