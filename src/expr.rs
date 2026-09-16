@@ -367,4 +367,450 @@ impl Checker {
             }
         }
     }
+
+    // Expressions:
+
+    pub fn check_expr(&mut self, expr: &ast::Expr, expected: Option<&Ty>) -> Expr {
+        let pos = expr.pos;
+        let expected_shallow = expected.map(|ty| self.shallow(ty));
+        match &expr.kind {
+            ast::ExprKind::Int(value) => self.int_literal(*value, expected_shallow, pos),
+            ast::ExprKind::Unary(UnOp::Neg, inner) if matches!(inner.kind, ast::ExprKind::Int(_)) => {
+                let ast::ExprKind::Int(value) = inner.kind else { unreachable!() };
+                self.int_literal(-value, expected_shallow, pos)
+            }
+            ast::ExprKind::Float(value) => node(Ty::Float, ExprKind::Float(*value), pos),
+            ast::ExprKind::Str(text) => node(Ty::Str, ExprKind::Str(text.clone()), pos),
+            ast::ExprKind::Bytes(bytes) => node(Ty::Bytes, ExprKind::Bytes(bytes.clone()), pos),
+            ast::ExprKind::Bool(value) => node(Ty::Bool, ExprKind::Bool(*value), pos),
+            ast::ExprKind::Unit => node(Ty::Unit, ExprKind::Unit, pos),
+            ast::ExprKind::Template(pieces) => {
+                let parts = pieces
+                    .iter()
+                    .map(|piece| match piece {
+                        ast::TemplatePiece::Text(text) => node(Ty::Str, ExprKind::Str(text.clone()), pos),
+                        ast::TemplatePiece::Code(code) => self.check_expr(code, None),
+                    })
+                    .collect();
+                node(Ty::Str, ExprKind::Template(parts), pos)
+            }
+            ast::ExprKind::Name(name) => self.check_name(name, pos),
+            ast::ExprKind::SelfValue => match self.find_local("self") {
+                Some(local) => node(self.f.locals[local].ty.clone(), ExprKind::Local(local), pos),
+                None => {
+                    self.error(pos, "self is only available in methods");
+                    node(Ty::Error, ExprKind::Unit, pos)
+                }
+            },
+            ast::ExprKind::Super => self.super_value(pos),
+            ast::ExprKind::Tuple(items) => {
+                let hints = match &expected_shallow {
+                    Some(Ty::Tuple(hints)) if hints.len() == items.len() => hints.clone(),
+                    _ => vec![],
+                };
+                let items: Vec<Expr> = items.iter().enumerate().map(|(i, item)| self.check_expr(item, hints.get(i))).collect();
+                node(Ty::Tuple(items.iter().map(|i| i.ty.clone()).collect()), ExprKind::Tuple(items), pos)
+            }
+            ast::ExprKind::List(items) => {
+                let item_ty = match &expected_shallow {
+                    Some(Ty::List(item)) => (**item).clone(),
+                    _ => self.fresh(),
+                };
+                let items = items.iter().map(|item| {
+                    let value = self.check_expr(item, Some(&item_ty));
+                    self.coerce(value, &item_ty)
+                }).collect();
+                node(Ty::List(Box::new(item_ty)), ExprKind::List(items), pos)
+            }
+            ast::ExprKind::Map(entries) => {
+                let (key_ty, value_ty) = match &expected_shallow {
+                    Some(Ty::Map(key, value)) => ((**key).clone(), (**value).clone()),
+                    _ => (self.fresh(), self.fresh()),
+                };
+                let entries = entries.iter().map(|(key, value)| {
+                    let key = self.check_expr(key, Some(&key_ty));
+                    let key = self.coerce(key, &key_ty);
+                    let value = self.check_expr(value, Some(&value_ty));
+                    (key, self.coerce(value, &value_ty))
+                }).collect();
+                node(Ty::Map(Box::new(key_ty), Box::new(value_ty)), ExprKind::Map(entries), pos)
+            }
+            ast::ExprKind::Block(block) => self.check_block(block, expected),
+            ast::ExprKind::If(cond, then, otherwise) => match &**cond {
+                ast::Cond::Let(pattern, value) => {
+                    let arms = vec![
+                        ast::Arm { pattern: pattern.clone(), guard: None, body: ast::Expr { kind: ast::ExprKind::Block(then.clone()), pos } },
+                        ast::Arm {
+                            pattern: ast::Pattern { kind: ast::PatKind::Wild, pos },
+                            guard: None,
+                            body: otherwise.as_deref().cloned().unwrap_or(ast::Expr { kind: ast::ExprKind::Unit, pos }),
+                        },
+                    ];
+                    let expected = if otherwise.is_some() { expected } else { None };
+                    let mut result = self.check_match(value, &arms, expected, pos);
+                    if otherwise.is_none() {
+                        result.ty = Ty::Unit;
+                    }
+                    result
+                }
+                ast::Cond::Expr(cond) => {
+                    let cond = self.check_cond(cond);
+                    match otherwise {
+                        None => {
+                            let then = self.check_block(then, None);
+                            node(Ty::Unit, ExprKind::If(boxed(cond), boxed(then), None), pos)
+                        }
+                        Some(otherwise) => {
+                            let mut result = None;
+                            let then = self.check_block(then, expected);
+                            let then = self.branch(then, expected, &mut result);
+                            let otherwise = self.check_expr(otherwise, expected);
+                            let otherwise = self.branch(otherwise, expected, &mut result);
+                            node(result.unwrap(), ExprKind::If(boxed(cond), boxed(then), Some(boxed(otherwise))), pos)
+                        }
+                    }
+                }
+            },
+            ast::ExprKind::Match(scrutinee, arms) => self.check_match(scrutinee, arms, expected, pos),
+            ast::ExprKind::While(cond, body) => match &**cond {
+                ast::Cond::Let(pattern, value) => {
+                    let arms = vec![
+                        ast::Arm { pattern: pattern.clone(), guard: None, body: ast::Expr { kind: ast::ExprKind::Block(body.clone()), pos } },
+                        ast::Arm { pattern: ast::Pattern { kind: ast::PatKind::Wild, pos }, guard: None, body: ast::Expr { kind: ast::ExprKind::Break(None), pos } },
+                    ];
+                    let matcher = ast::Expr { kind: ast::ExprKind::Match(Box::new(value.clone()), arms), pos };
+                    let block = ast::Block { stmts: vec![ast::Stmt::Expr(matcher)], tail: None, pos };
+                    self.f.loops.push(None);
+                    let body = self.check_block(&block, None);
+                    self.f.loops.pop();
+                    node(Ty::Unit, ExprKind::Loop(boxed(body)), pos)
+                }
+                ast::Cond::Expr(cond) => {
+                    let cond = self.check_cond(cond);
+                    self.f.loops.push(None);
+                    let body = self.check_block(body, None);
+                    self.f.loops.pop();
+                    node(Ty::Unit, ExprKind::While(boxed(cond), boxed(body)), pos)
+                }
+            },
+            ast::ExprKind::For(pattern, iterable, body) => self.check_for(pattern, iterable, body, pos),
+            ast::ExprKind::Loop(body) => {
+                let break_ty = self.fresh();
+                self.f.loops.push(Some(break_ty.clone()));
+                let body = self.check_block(body, None);
+                self.f.loops.pop();
+                let ty = match self.shallow(&break_ty) {
+                    Ty::Var(_) => Ty::Never,
+                    ty => ty,
+                };
+                node(ty, ExprKind::Loop(boxed(body)), pos)
+            }
+            ast::ExprKind::Lambda(params, body) => self.check_lambda(params, body, expected, pos),
+            ast::ExprKind::Return(value) => {
+                let ret = self.f.rets.last().cloned().unwrap_or(Ty::Unit);
+                let value = value.as_ref().map(|value| {
+                    let value = self.check_expr(value, Some(&ret));
+                    boxed(self.coerce(value, &ret))
+                });
+                if value.is_none() && !matches!(self.shallow(&ret), Ty::Unit | Ty::Var(_)) {
+                    self.error(pos, "expected a return value");
+                }
+                node(Ty::Never, ExprKind::Return(value), pos)
+            }
+            ast::ExprKind::Break(value) => {
+                let Some(target) = self.f.loops.last().cloned() else {
+                    self.error(pos, "break outside of a loop");
+                    return node(Ty::Never, ExprKind::Unit, pos);
+                };
+                let value = match (value, target) {
+                    (Some(value), Some(ty)) => {
+                        let value = self.check_expr(value, Some(&ty));
+                        Some(boxed(self.coerce(value, &ty)))
+                    }
+                    (Some(value), None) => {
+                        self.error(value.pos, "break with a value is only allowed in loop");
+                        None
+                    }
+                    (None, Some(ty)) => {
+                        self.unify(&ty, &Ty::Unit);
+                        None
+                    }
+                    (None, None) => None,
+                };
+                node(Ty::Never, ExprKind::Break(value), pos)
+            }
+            ast::ExprKind::Continue => {
+                if self.f.loops.is_empty() {
+                    self.error(pos, "continue outside of a loop");
+                }
+                node(Ty::Never, ExprKind::Continue, pos)
+            }
+            ast::ExprKind::Throw(value) => {
+                let value = self.check_expr(value, None);
+                let throwable = match self.shallow(&value.ty) {
+                    Ty::Dyn | Ty::Error => true,
+                    Ty::Named(def, _) => Some(&def) == self.builtins.get("PyErr") || matches!(self.defs[def].kind, DefKind::ExternType { .. } | DefKind::PyClass { .. }),
+                    _ => false,
+                };
+                if !throwable {
+                    let message = format!("cannot throw {}, only python exceptions", self.show(&value.ty));
+                    self.error(value.pos, message);
+                }
+                node(Ty::Never, ExprKind::Throw(boxed(value)), pos)
+            }
+            ast::ExprKind::TryExpr(inner) => {
+                let inner = self.check_expr(inner, None);
+                let ty = self.builtin_ty("Result", vec![inner.ty.clone(), self.builtin_ty("PyErr", vec![])]);
+                node(ty, ExprKind::TryExpr(boxed(inner)), pos)
+            }
+            ast::ExprKind::Binary(op, left, right) => self.check_binary(*op, left, right, pos, expected),
+            ast::ExprKind::Unary(op, inner) => self.check_unary(*op, inner, pos, expected),
+            ast::ExprKind::Pipe(left, right) => {
+                let call = match &right.kind {
+                    ast::ExprKind::Call(callee, type_args, args) => {
+                        let mut all = vec![ast::Arg::Pos((**left).clone())];
+                        all.extend(args.iter().cloned());
+                        ast::ExprKind::Call(callee.clone(), type_args.clone(), all)
+                    }
+                    _ => ast::ExprKind::Call(right.clone(), vec![], vec![ast::Arg::Pos((**left).clone())]),
+                };
+                self.check_expr(&ast::Expr { kind: call, pos }, expected)
+            }
+            ast::ExprKind::Range(start, end, inclusive) => {
+                let start = self.check_expr(start, Some(&Ty::Int));
+                let start = self.coerce(start, &Ty::Int);
+                let end = self.check_expr(end, Some(&Ty::Int));
+                let end = self.coerce(end, &Ty::Int);
+                node(Ty::List(Box::new(Ty::Int)), ExprKind::Range(boxed(start), boxed(end), *inclusive), pos)
+            }
+            ast::ExprKind::Cast(inner, kind, ty) => {
+                let target = self.resolve_here(ty);
+                let inner = self.check_expr(inner, None);
+                let source = self.shallow(&inner.ty);
+                match kind {
+                    CastKind::Static if self.has_vars(&inner.ty) && self.compatible(&inner.ty, &target) => {
+                        self.unify(&inner.ty, &target);
+                        inner
+                    }
+                    CastKind::Static => match (&source, self.shallow(&target)) {
+                        (Ty::Error, _) => inner,
+                        (_, Ty::Dyn) => self.dynamic(inner),
+                        (Ty::Int, Ty::Float) | (Ty::Float, Ty::Int) | (Ty::Int, Ty::BigInt) | (Ty::BigInt, Ty::Int) | (Ty::BigInt, Ty::Float) => {
+                            node(target, ExprKind::Cast(boxed(inner)), pos)
+                        }
+                        (source, target) if *source == target => inner,
+                        _ => {
+                            let message = format!("cannot convert {} to {} with as", self.show(&source), self.show(&target));
+                            self.error(pos, message);
+                            inner
+                        }
+                    },
+                    CastKind::Checked | CastKind::Optional => {
+                        if !matches!(source, Ty::Dyn | Ty::Error) {
+                            let keyword = if *kind == CastKind::Checked { "as!" } else { "as?" };
+                            self.error(pos, format!("{keyword} needs a Dyn operand, found {}", self.show(&source)));
+                        }
+                        let optional = *kind == CastKind::Optional;
+                        let ty = if optional { self.builtin_ty("Option", vec![target]) } else { target };
+                        node(ty, ExprKind::FromDyn(boxed(inner), optional), pos)
+                    }
+                }
+            }
+            ast::ExprKind::Await(inner) => {
+                if !self.f.is_async {
+                    self.error(pos, "await is only allowed in async functions");
+                }
+                let inner = self.check_expr(inner, None);
+                let ty = match self.shallow(&inner.ty) {
+                    Ty::Coroutine(result) => *result,
+                    Ty::Dyn | Ty::Error => Ty::Dyn,
+                    other => {
+                        let message = format!("cannot await {}", self.show(&other));
+                        self.error(pos, message);
+                        Ty::Error
+                    }
+                };
+                let inner = self.dynamic(inner);
+                node(ty, ExprKind::Await(boxed(inner)), pos)
+            }
+            ast::ExprKind::Call(callee, _, args) => self.check_call(callee, args, pos, expected),
+            ast::ExprKind::Index(object, args) => {
+                let target = self.check_expr(object, None);
+                match (self.shallow(&target.ty), args.as_slice()) {
+                    (Ty::List(item), [ast::IndexArg::Expr(index)]) => {
+                        let index = self.check_expr(index, Some(&Ty::Int));
+                        let index = self.coerce(index, &Ty::Int);
+                        node(*item, ExprKind::Index(boxed(target), boxed(index)), pos)
+                    }
+                    (Ty::Map(key, item), [ast::IndexArg::Expr(index)]) => {
+                        let index = self.check_expr(index, Some(&key));
+                        let index = self.coerce(index, &key);
+                        node(*item, ExprKind::Index(boxed(target), boxed(index)), pos)
+                    }
+                    (Ty::Dyn | Ty::Error, _) | (Ty::Named(..), _) => {
+                        let target = self.dynamic(target);
+                        let parts = self.index_parts(args);
+                        node(Ty::Dyn, ExprKind::PyIndex(boxed(target), parts), pos)
+                    }
+                    (other, _) => {
+                        let message = format!("cannot index {}", self.show(&other));
+                        self.error(pos, message);
+                        node(Ty::Error, ExprKind::Unit, pos)
+                    }
+                }
+            }
+            ast::ExprKind::Member(object, name) => self.check_member(object, name, pos),
+            ast::ExprKind::TupleField(object, index) => {
+                let target = self.check_expr(object, None);
+                match self.shallow(&target.ty) {
+                    Ty::Tuple(items) if *index < items.len() => node(items[*index].clone(), ExprKind::TupleGet(boxed(target), *index), pos),
+                    other => {
+                        let message = format!("{} has no field {index}", self.show(&other));
+                        self.error(pos, message);
+                        node(Ty::Error, ExprKind::Unit, pos)
+                    }
+                }
+            }
+            ast::ExprKind::Question(inner) => self.check_question(inner, pos),
+        }
+    }
+
+    fn int_literal(&mut self, value: i64, expected: Option<Ty>, pos: Pos) -> Expr {
+        match expected {
+            Some(Ty::Float) => node(Ty::Float, ExprKind::Float(value as f64), pos),
+            Some(Ty::BigInt) => node(Ty::BigInt, ExprKind::Int(value), pos),
+            _ => node(Ty::Int, ExprKind::Int(value), pos),
+        }
+    }
+
+    fn check_cond(&mut self, cond: &ast::Expr) -> Expr {
+        let cond = self.check_expr(cond, Some(&Ty::Bool));
+        if !matches!(self.shallow(&cond.ty), Ty::Bool | Ty::Error | Ty::Never) && !self.unify(&cond.ty, &Ty::Bool) {
+            let message = format!("condition must be Bool, found {}", self.show(&cond.ty));
+            self.error(cond.pos, message);
+        }
+        cond
+    }
+
+    fn super_value(&mut self, pos: Pos) -> Expr {
+        let (Some(class), Some(this)) = (self.f.class, self.find_local("self")) else {
+            self.error(pos, "super is only available in py class methods");
+            return node(Ty::Error, ExprKind::Unit, pos);
+        };
+        let DefKind::PyClass { global, .. } = self.defs[class].kind else { unreachable!() };
+        node(Ty::Dyn, ExprKind::Super(global, this), pos)
+    }
+
+    fn check_question(&mut self, inner: &ast::Expr, pos: Pos) -> Expr {
+        let inner = self.check_expr(inner, None);
+        let ret = self.f.rets.last().cloned().unwrap_or(Ty::Unit);
+        let (option, result) = (self.builtins["Option"], self.builtins["Result"]);
+        let ret_head = match self.shallow(&ret) {
+            Ty::Named(def, args) if def == option || def == result => Some((def, args)),
+            _ => None,
+        };
+        let value_ty = match (self.shallow(&inner.ty), ret_head) {
+            (Ty::Error, _) => Ty::Error,
+            (_, None) => {
+                self.error(pos, "? needs the enclosing function to return Result or Option");
+                Ty::Error
+            }
+            (Ty::Named(def, args), Some((ret_def, ret_args))) if def == result && ret_def == result => {
+                if !self.unify(&args[1], &ret_args[1]) {
+                    let message = format!("? cannot return error {} from a function returning {}", self.show(&args[1]), self.show(&ret));
+                    self.error(pos, message);
+                }
+                args[0].clone()
+            }
+            (Ty::Named(def, args), Some((ret_def, _))) if def == option && ret_def == option => args[0].clone(),
+            (other, _) => {
+                let message = format!("? needs a Result or Option matching the function, found {}", self.show(&other));
+                self.error(pos, message);
+                Ty::Error
+            }
+        };
+        node(value_ty, ExprKind::Question(boxed(inner)), pos)
+    }
+
+    fn check_for(&mut self, pattern: &ast::Pattern, iterable: &ast::Expr, body: &ast::Block, pos: Pos) -> Expr {
+        let iterable = self.check_expr(iterable, None);
+        let item = match self.shallow(&iterable.ty) {
+            Ty::List(item) | Ty::Set(item) => *item,
+            Ty::Map(key, _) => *key,
+            Ty::Str => Ty::Str,
+            Ty::Dyn | Ty::Error => Ty::Dyn,
+            Ty::Named(def, _) if matches!(self.defs[def].kind, DefKind::ExternType { .. } | DefKind::PyClass { .. }) => Ty::Dyn,
+            other => {
+                let message = format!("cannot iterate over {}", self.show(&other));
+                self.error(iterable.pos, message);
+                Ty::Error
+            }
+        };
+        let iterable = if matches!(iterable.ty, Ty::Named(..)) { self.dynamic(iterable) } else { iterable };
+        self.scoped(|this| {
+            let pattern = this.check_pattern(pattern, &item);
+            if !this.irrefutable(&pattern) {
+                this.error(pos, "for patterns must always match");
+            }
+            this.f.loops.push(None);
+            let body = this.check_block(body, None);
+            this.f.loops.pop();
+            node(Ty::Unit, ExprKind::For(Box::new(pattern), boxed(iterable), boxed(body)), pos)
+        })
+    }
+
+    pub fn check_lambda(&mut self, params: &[(String, Pos, Option<ast::TypeExpr>)], body: &ast::Expr, expected: Option<&Ty>, pos: Pos) -> Expr {
+        let expected = expected.map(|ty| self.shallow(ty));
+        let (hint_params, hint_ret) = match &expected {
+            Some(Ty::Fn(params_hint, ret)) if params_hint.len() == params.len() => (Some(params_hint.clone()), Some((**ret).clone())),
+            _ => (None, None),
+        };
+        let dynamic = expected == Some(Ty::Dyn);
+        let index = self.f.lambdas.len();
+        self.f.lambdas.push(Lambda { params: vec![], captures: vec![], body: node(Ty::Unit, ExprKind::Unit, pos), ret: Ty::Unit });
+        self.f.owners.push(index + 1);
+        self.f.scopes.push(HashMap::new());
+        let mut param_tys = vec![];
+        let mut locals = vec![];
+        for (i, (name, param_pos, ty)) in params.iter().enumerate() {
+            let hint = hint_params.as_ref().map(|h| h[i].clone());
+            let ty = match (ty, hint) {
+                (Some(ty), hint) => {
+                    let ty = self.resolve_here(ty);
+                    if let Some(hint) = hint {
+                        if !self.unify(&ty, &hint) {
+                            let message = format!("expected parameter of type {}, found {}", self.show(&hint), self.show(&ty));
+                            self.error(*param_pos, message);
+                        }
+                    }
+                    ty
+                }
+                (None, Some(hint)) if !matches!(self.shallow(&hint), Ty::Error) => hint,
+                (None, _) if dynamic => Ty::Dyn,
+                (None, _) => {
+                    let var = self.fresh();
+                    self.f.infer.push((var.clone(), *param_pos, name.clone()));
+                    var
+                }
+            };
+            param_tys.push(ty.clone());
+            locals.push(self.declare_local(name, ty, false));
+        }
+        let ret = hint_ret.unwrap_or_else(|| self.fresh());
+        self.f.rets.push(ret.clone());
+        let saved_loops = std::mem::take(&mut self.f.loops);
+        let saved_async = std::mem::replace(&mut self.f.is_async, false);
+        let value = self.check_expr(body, Some(&ret));
+        self.f.is_async = saved_async;
+        let value = if self.shallow(&ret) == Ty::Unit { value } else { self.coerce(value, &ret) };
+        self.f.loops = saved_loops;
+        self.f.rets.pop();
+        self.f.scopes.pop();
+        self.f.owners.pop();
+        let lambda = &mut self.f.lambdas[index];
+        lambda.params = locals;
+        lambda.body = value;
+        lambda.ret = ret.clone();
+        node(Ty::Fn(param_tys, Box::new(ret)), ExprKind::Lambda(index), pos)
+    }
 }
