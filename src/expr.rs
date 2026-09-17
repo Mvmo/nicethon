@@ -813,4 +813,380 @@ impl Checker {
         lambda.ret = ret.clone();
         node(Ty::Fn(param_tys, Box::new(ret)), ExprKind::Lambda(index), pos)
     }
+
+    fn check_binary(&mut self, op: BinOp, left: &ast::Expr, right: &ast::Expr, pos: Pos, expected: Option<&Ty>) -> Expr {
+        if matches!(op, BinOp::And | BinOp::Or) {
+            let left = self.check_cond(left);
+            let right = self.check_cond(right);
+            return node(Ty::Bool, ExprKind::Binary(op, boxed(left), boxed(right)), pos);
+        }
+        let literal = |e: &ast::Expr| matches!(&e.kind, ast::ExprKind::Int(_) | ast::ExprKind::Float(_))
+            || matches!(&e.kind, ast::ExprKind::Unary(UnOp::Neg, inner) if matches!(inner.kind, ast::ExprKind::Int(_) | ast::ExprKind::Float(_)));
+        let arithmetic = !op.is_comparison() && !matches!(op, BinOp::In | BinOp::Div);
+        let expected = expected.filter(|_| arithmetic);
+        let (left, right) = if literal(left) && !literal(right) && op != BinOp::In {
+            let right = self.check_expr(right, expected);
+            let left = self.check_expr(left, Some(&right.ty));
+            (left, right)
+        } else {
+            let left = self.check_expr(left, expected);
+            let hint = if op == BinOp::In { None } else { Some(left.ty.clone()) };
+            let right = self.check_expr(right, hint.as_ref());
+            (left, right)
+        };
+        let (left_ty, right_ty) = (self.shallow(&left.ty), self.shallow(&right.ty));
+        if matches!(left_ty, Ty::Error) || matches!(right_ty, Ty::Error) {
+            return node(Ty::Error, ExprKind::Binary(op, boxed(left), boxed(right)), pos);
+        }
+        if left_ty == Ty::Dyn || right_ty == Ty::Dyn {
+            let left = self.dynamic(left);
+            let right = self.dynamic(right);
+            let ty = if op == BinOp::In { Ty::Bool } else { Ty::Dyn };
+            return node(ty, ExprKind::Binary(op, boxed(left), boxed(right)), pos);
+        }
+        if matches!(left_ty, Ty::Var(_)) || matches!(right_ty, Ty::Var(_)) && op != BinOp::In {
+            self.unify(&left_ty, &right_ty);
+        }
+        if arithmetic && matches!(self.shallow(&left.ty), Ty::Var(_)) {
+            self.hint(&left.ty, expected);
+            if matches!(self.shallow(&left.ty), Ty::Var(_)) {
+                self.error(pos, "cannot infer the type of these operands, add a type annotation");
+                return node(Ty::Error, ExprKind::Binary(op, boxed(left), boxed(right)), pos);
+            }
+        }
+        let (left_ty, right_ty) = (self.shallow(&left.ty), self.shallow(&right.ty));
+        let show = |this: &Self| (this.show(&left_ty), this.show(&right_ty));
+        let ty = match op {
+            BinOp::Eq | BinOp::Ne => {
+                if !self.unify(&left_ty, &right_ty) {
+                    let (l, r) = show(self);
+                    self.error(pos, format!("cannot compare {l} and {r}"));
+                }
+                Ty::Bool
+            }
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                let ord = self.builtins["Ord"];
+                if !self.unify(&left_ty, &right_ty) {
+                    let (l, r) = show(self);
+                    self.error(pos, format!("cannot compare {l} and {r}"));
+                } else if !self.implements(&left_ty, ord) {
+                    let (l, _) = show(self);
+                    self.error(pos, format!("{l} does not implement Ord"));
+                }
+                Ty::Bool
+            }
+            BinOp::In => {
+                let item = match &right_ty {
+                    Ty::List(item) | Ty::Set(item) | Ty::Map(item, _) => Some((**item).clone()),
+                    Ty::Str => Some(Ty::Str),
+                    _ => None,
+                };
+                if !item.is_some_and(|item| self.unify(&item, &left_ty)) {
+                    let (l, r) = show(self);
+                    self.error(pos, format!("cannot check {l} in {r}"));
+                }
+                Ty::Bool
+            }
+            _ => match (&left_ty, &right_ty, op) {
+                (Ty::Int, Ty::Int, BinOp::Div) | (Ty::BigInt, Ty::BigInt, BinOp::Div) => Ty::Float,
+                (Ty::Int, Ty::Int, BinOp::MatMul) => self.bad_operands(op, &left_ty, &right_ty, pos),
+                (Ty::Int, Ty::Int, _) | (Ty::BigInt, Ty::BigInt, _) => left_ty.clone(),
+                (Ty::Float, Ty::Float, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::FloorDiv | BinOp::Mod | BinOp::Pow) => Ty::Float,
+                (Ty::Str, Ty::Str, BinOp::Add) => Ty::Str,
+                (Ty::List(_), Ty::List(_), BinOp::Add) if self.unify(&left_ty, &right_ty) => left_ty.clone(),
+                (Ty::Param(_), Ty::Param(_), _) if left_ty == right_ty => left_ty.clone(),
+                _ => self.bad_operands(op, &left_ty, &right_ty, pos),
+            },
+        };
+        node(ty, ExprKind::Binary(op, boxed(left), boxed(right)), pos)
+    }
+
+    fn bad_operands(&mut self, op: BinOp, left: &Ty, right: &Ty, pos: Pos) -> Ty {
+        let message = format!("cannot apply {} to {} and {}", op.text(), self.show(left), self.show(right));
+        self.error(pos, message);
+        Ty::Error
+    }
+
+    fn check_unary(&mut self, op: UnOp, inner: &ast::Expr, pos: Pos, expected: Option<&Ty>) -> Expr {
+        let inner = self.check_expr(inner, if op == UnOp::Not { None } else { expected });
+        self.hint(&inner.ty, expected.filter(|_| op != UnOp::Not));
+        let ty = match (op, self.shallow(&inner.ty)) {
+            (_, Ty::Var(_)) => {
+                self.error(pos, "cannot infer the type of this value, add a type annotation");
+                Ty::Error
+            }
+            (_, Ty::Dyn) => Ty::Dyn,
+            (_, Ty::Error) => Ty::Error,
+            (UnOp::Neg, ty @ (Ty::Int | Ty::Float | Ty::BigInt)) => ty,
+            (UnOp::Not, Ty::Bool) => Ty::Bool,
+            (UnOp::BitNot, ty @ (Ty::Int | Ty::BigInt)) => ty,
+            (_, other) => {
+                let symbol = match op {
+                    UnOp::Neg => "-",
+                    UnOp::Not => "!",
+                    UnOp::BitNot => "~",
+                };
+                let message = format!("cannot apply {symbol} to {}", self.show(&other));
+                self.error(pos, message);
+                Ty::Error
+            }
+        };
+        node(ty, ExprKind::Unary(op, boxed(inner)), pos)
+    }
+
+    // Names and members:
+
+    fn check_name(&mut self, name: &str, pos: Pos) -> Expr {
+        if let Some(local) = self.find_local(name) {
+            return node(self.f.locals[local].ty.clone(), ExprKind::Local(local), pos);
+        }
+        match self.lookup(name) {
+            Some(binding) => self.binding_value(binding, name, pos),
+            None => {
+                self.error(pos, format!("unknown name {name}"));
+                node(Ty::Error, ExprKind::Unit, pos)
+            }
+        }
+    }
+
+    fn binding_value(&mut self, binding: Binding, name: &str, pos: Pos) -> Expr {
+        match binding {
+            Binding::Def(def) => self.def_value(def, pos),
+            Binding::Global(global) | Binding::TypedPy(global, _) | Binding::PyModule(global, _) => node(self.globals[global].ty.clone(), ExprKind::Global(global), pos),
+            Binding::NiceModule(_) => {
+                self.error(pos, format!("module {name} is not a value"));
+                node(Ty::Error, ExprKind::Unit, pos)
+            }
+        }
+    }
+
+    fn def_value(&mut self, def: DefId, pos: Pos) -> Expr {
+        match self.defs[def].kind.clone() {
+            DefKind::Fn(sig) if sig.kind == FnKind::Native => {
+                let (params, ret, type_args) = self.instantiate(&sig);
+                let ret = if sig.is_async { Ty::Coroutine(Box::new(ret)) } else { ret };
+                node(Ty::Fn(params, Box::new(ret)), ExprKind::FnRef(def, type_args), pos)
+            }
+            DefKind::Variant { parent, fields } if fields.is_empty() => {
+                let ty = self.fresh_named(parent);
+                node(ty, ExprKind::Construct(def, vec![]), pos)
+            }
+            DefKind::PyClass { global, .. } => node(Ty::Dyn, ExprKind::Global(global), pos),
+            _ => {
+                let message = format!("{} cannot be used as a value", self.defs[def].name);
+                self.error(pos, message);
+                node(Ty::Error, ExprKind::Unit, pos)
+            }
+        }
+    }
+
+    fn fresh_named(&mut self, def: DefId) -> Ty {
+        let count = match &self.defs[def].kind {
+            DefKind::Struct { generics, .. } | DefKind::Enum { generics, .. } | DefKind::ExternType { generics, .. } => generics.len(),
+            _ => 0,
+        };
+        let args = (0..count).map(|_| self.fresh()).collect();
+        Ty::Named(def, args)
+    }
+
+    fn type_name(&self, expr: &ast::Expr) -> Option<Binding> {
+        let ast::ExprKind::Name(name) = &expr.kind else { return None };
+        if self.f.scopes.iter().any(|scope| scope.contains_key(name)) {
+            return None;
+        }
+        if name == "Self" {
+            if let Some(Ty::Named(def, _)) = &self.f.self_ty {
+                return Some(Binding::Def(*def));
+            }
+        }
+        match self.lookup(name)? {
+            Binding::Def(def) if matches!(self.defs[def].kind, DefKind::Struct { .. } | DefKind::Enum { .. } | DefKind::PyClass { .. }) => Some(Binding::Def(def)),
+            binding @ (Binding::PyModule(..) | Binding::NiceModule(_)) => Some(binding),
+            Binding::TypedPy(global, def) if matches!(self.defs[def].kind, DefKind::ExternType { .. }) => Some(Binding::TypedPy(global, def)),
+            _ => None,
+        }
+    }
+
+    fn static_member(&mut self, owner: Binding, name: &str, pos: Pos) -> Option<Callee> {
+        match owner {
+            Binding::Def(def) => {
+                if let DefKind::Enum { variants, .. } = &self.defs[def].kind {
+                    if let Some(&variant) = variants.iter().find(|v| self.defs[**v].name == name) {
+                        return Some(Callee::Construct(variant));
+                    }
+                }
+                if let DefKind::PyClass { global, methods, .. } = &self.defs[def].kind {
+                    let method = methods.iter().find(|(m, _)| m == name).map(|(_, d)| *d);
+                    let attr = node(Ty::Dyn, ExprKind::PyAttr(boxed(node(Ty::Dyn, ExprKind::Global(*global), pos)), name.to_string()), pos);
+                    return Some(Callee::Py(attr, method, None));
+                }
+                let ty = self.fresh_named(def);
+                self.find_method(&ty, name).map(|method| Callee::Native(method, None))
+            }
+            Binding::TypedPy(global, def) => {
+                let method = self.find_py_method(def, name);
+                let attr = node(Ty::Dyn, ExprKind::PyAttr(boxed(node(Ty::Dyn, ExprKind::Global(global), pos)), name.to_string()), pos);
+                Some(Callee::Py(attr, method, None))
+            }
+            Binding::PyModule(global, module) => {
+                let attr = node(Ty::Dyn, ExprKind::PyAttr(boxed(node(Ty::Dyn, ExprKind::Global(global), pos)), name.to_string()), pos);
+                let def = self.externs.get(&module).and_then(|names| names.get(name)).copied();
+                Some(match def.map(|d| (d, &self.defs[d].kind)) {
+                    Some((def, DefKind::ExternType { .. })) => Callee::PyConstruct(attr, def),
+                    Some((def, DefKind::Fn(_))) => Callee::Py(attr, Some(def), None),
+                    _ => Callee::Py(attr, None, None),
+                })
+            }
+            Binding::NiceModule(module) => match self.scopes[module].get(name).cloned() {
+                Some(Binding::Def(def)) if self.defs[def].export => self.def_callee(def, pos),
+                _ => None,
+            },
+            Binding::Global(_) => None,
+        }
+    }
+
+    fn def_callee(&mut self, def: DefId, pos: Pos) -> Option<Callee> {
+        Some(match &self.defs[def].kind {
+            DefKind::Fn(sig) if sig.kind == FnKind::PyFunction => return None,
+            DefKind::Fn(_) => Callee::Native(def, None),
+            DefKind::Struct { .. } | DefKind::Variant { .. } => Callee::Construct(def),
+            DefKind::PyClass { global, .. } => Callee::PyConstruct(node(Ty::Dyn, ExprKind::Global(*global), pos), def),
+            _ => return None,
+        })
+    }
+
+    fn check_member(&mut self, object: &ast::Expr, name: &str, pos: Pos) -> Expr {
+        if let Some(owner) = self.type_name(object) {
+            match owner.clone() {
+                Binding::PyModule(global, module) => {
+                    let attr = node(Ty::Dyn, ExprKind::PyAttr(boxed(node(Ty::Dyn, ExprKind::Global(global), pos)), name.to_string()), pos);
+                    let def = self.externs.get(&module).and_then(|names| names.get(name)).copied();
+                    return match def.map(|d| self.defs[d].kind.clone()) {
+                        Some(DefKind::Alias(_, ty)) => self.typed(attr, ty),
+                        Some(DefKind::Fn(sig)) if sig.generics.is_empty() => {
+                            let ty = Ty::Fn(sig.params.iter().map(|p| p.ty.clone()).collect(), Box::new(sig.ret.clone()));
+                            Expr { ty, ..attr }
+                        }
+                        _ => attr,
+                    };
+                }
+                Binding::NiceModule(module) => {
+                    return match self.scopes[module].get(name).cloned() {
+                        Some(binding @ Binding::Def(def)) if self.defs[def].export => self.binding_value(binding, name, pos),
+                        _ => {
+                            self.error(pos, format!("module has no export {name}"));
+                            node(Ty::Error, ExprKind::Unit, pos)
+                        }
+                    };
+                }
+                Binding::Def(def) => {
+                    if let DefKind::Enum { variants, .. } = &self.defs[def].kind {
+                        if let Some(&variant) = variants.iter().find(|v| self.defs[**v].name == name) {
+                            return self.def_value(variant, pos);
+                        }
+                    }
+                    let ty = self.fresh_named(def);
+                    if let Some(method) = self.find_method(&ty, name) {
+                        return self.def_value(method, pos);
+                    }
+                }
+                _ => {}
+            }
+            if !matches!(owner, Binding::Def(def) if matches!(self.defs[def].kind, DefKind::PyClass { .. })) && !matches!(owner, Binding::TypedPy(..)) {
+                self.error(pos, format!("unknown member {name}"));
+                return node(Ty::Error, ExprKind::Unit, pos);
+            }
+        }
+        let target = self.check_expr(object, None);
+        self.member_of(target, name, pos)
+    }
+
+    fn member_of(&mut self, target: Expr, name: &str, pos: Pos) -> Expr {
+        match self.shallow(&target.ty) {
+            Ty::Named(def, args) => match self.defs[def].kind.clone() {
+                DefKind::Struct { fields, .. } => match fields.iter().position(|f| f.name.as_deref() == Some(name)) {
+                    Some(index) => node(fields[index].ty.subst(&args), ExprKind::Field(boxed(target), def, index), pos),
+                    None => {
+                        let message = format!("{} has no field {name}", self.show(&target.ty));
+                        self.error(pos, message);
+                        node(Ty::Error, ExprKind::Unit, pos)
+                    }
+                },
+                DefKind::PyClass { .. } | DefKind::ExternType { .. } => {
+                    let ty = self.py_attr_type(def, &args, name).unwrap_or(Ty::Dyn);
+                    let attr = node(Ty::Dyn, ExprKind::PyAttr(boxed(target), name.to_string()), pos);
+                    self.typed(attr, ty)
+                }
+                _ => {
+                    let message = format!("{} has no field {name}", self.show(&target.ty));
+                    self.error(pos, message);
+                    node(Ty::Error, ExprKind::Unit, pos)
+                }
+            },
+            Ty::Dyn => node(Ty::Dyn, ExprKind::PyAttr(boxed(target), name.to_string()), pos),
+            Ty::Error => target,
+            other => {
+                let message = format!("{} has no field {name}", self.show(&other));
+                self.error(pos, message);
+                node(Ty::Error, ExprKind::Unit, pos)
+            }
+        }
+    }
+
+    pub fn find_py_method(&self, def: DefId, name: &str) -> Option<DefId> {
+        match &self.defs[def].kind {
+            DefKind::PyClass { methods, bases, .. } => methods.iter().find(|(m, _)| m == name).map(|(_, d)| *d).or_else(|| {
+                bases.iter().find_map(|base| self.py_base(def, base).and_then(|base| self.find_py_method(base, name)))
+            }),
+            DefKind::ExternType { methods, bases, .. } => methods.iter().find(|(m, _)| m == name).map(|(_, d)| *d).or_else(|| {
+                bases.iter().find_map(|base| match base {
+                    Ty::Named(base, _) => self.find_py_method(*base, name),
+                    _ => None,
+                })
+            }),
+            _ => None,
+        }
+    }
+
+    fn py_base(&self, class: DefId, base: &Expr) -> Option<DefId> {
+        let ExprKind::Global(global) = base.kind else { return None };
+        self.scopes[self.defs[class].module].values().find_map(|binding| match binding {
+            Binding::TypedPy(g, def) if *g == global => Some(*def),
+            _ => None,
+        })
+    }
+
+    fn py_attr_type(&self, def: DefId, args: &[Ty], name: &str) -> Option<Ty> {
+        match &self.defs[def].kind {
+            DefKind::PyClass { fields, bases, .. } => fields.iter().find(|f| f.name.as_deref() == Some(name)).map(|f| f.ty.clone()).or_else(|| {
+                bases.iter().find_map(|base| self.py_base(def, base).and_then(|base| self.py_attr_type(base, &[], name)))
+            }),
+            DefKind::ExternType { attrs, bases, .. } => attrs.iter().find(|(a, _)| a == name).map(|(_, ty)| ty.subst(args)).or_else(|| {
+                bases.iter().find_map(|base| match base {
+                    Ty::Named(base, base_args) => self.py_attr_type(*base, base_args, name),
+                    _ => None,
+                })
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn find_method(&self, ty: &Ty, name: &str) -> Option<DefId> {
+        let ty = self.shallow(ty);
+        let matching: Vec<&Impl> = self.impls.iter().filter(|imp| same_head(&imp.target, &ty)).collect();
+        let direct = |inherent: bool| {
+            matching
+                .iter()
+                .filter(|imp| imp.trait_def.is_none() == inherent)
+                .find_map(|imp| imp.methods.iter().find(|(m, _)| m == name).map(|(_, d)| *d))
+        };
+        direct(true).or_else(|| direct(false)).or_else(|| {
+            matching.iter().filter_map(|imp| imp.trait_def).find_map(|trait_def| self.trait_method(trait_def, name))
+        })
+    }
+
+    fn trait_method(&self, trait_def: DefId, name: &str) -> Option<DefId> {
+        let DefKind::Trait { methods, .. } = &self.defs[trait_def].kind else { return None };
+        methods.iter().find(|(m, _)| m == name).map(|(_, d)| *d)
+    }
 }
