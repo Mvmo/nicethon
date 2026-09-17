@@ -1189,4 +1189,417 @@ impl Checker {
         let DefKind::Trait { methods, .. } = &self.defs[trait_def].kind else { return None };
         methods.iter().find(|(m, _)| m == name).map(|(_, d)| *d)
     }
+
+    // Calls:
+
+    fn check_call(&mut self, callee: &ast::Expr, args: &[ast::Arg], pos: Pos, expected: Option<&Ty>) -> Expr {
+        let callee = match &callee.kind {
+            ast::ExprKind::Name(name) if self.f.scopes.iter().all(|s| !s.contains_key(name)) => match self.lookup(name) {
+                Some(Binding::Def(def)) => match self.def_callee(def, pos) {
+                    Some(callee) => callee,
+                    None => {
+                        let value = self.def_value(def, pos);
+                        self.value_callee(value)
+                    }
+                },
+                Some(Binding::TypedPy(global, def)) => {
+                    let value = node(Ty::Dyn, ExprKind::Global(global), pos);
+                    match self.defs[def].kind {
+                        DefKind::ExternType { .. } => Callee::PyConstruct(value, def),
+                        DefKind::Fn(_) => Callee::Py(value, Some(def), None),
+                        _ => Callee::Py(value, None, None),
+                    }
+                }
+                Some(binding) => {
+                    let value = self.binding_value(binding, name, pos);
+                    self.value_callee(value)
+                }
+                None => {
+                    self.error(pos, format!("unknown name {name}"));
+                    return node(Ty::Error, ExprKind::Unit, pos);
+                }
+            },
+            ast::ExprKind::Member(object, name) => {
+                let static_callee = match self.type_name(object) {
+                    Some(owner) => self.static_member(owner, name, pos),
+                    None => None,
+                };
+                match static_callee {
+                    Some(callee) => callee,
+                    None if matches!(object.kind, ast::ExprKind::Super) => {
+                        let target = self.super_value(pos);
+                        Callee::Py(node(Ty::Dyn, ExprKind::PyAttr(boxed(target), name.clone()), pos), None, None)
+                    }
+                    None => {
+                        let target = self.check_expr(object, None);
+                        match self.method_callee(target, name, pos) {
+                            Some(callee) => callee,
+                            None => return node(Ty::Error, ExprKind::Unit, pos),
+                        }
+                    }
+                }
+            }
+            _ => {
+                let value = self.check_expr(callee, None);
+                self.value_callee(value)
+            }
+        };
+        self.apply(callee, args, pos, expected)
+    }
+
+    fn value_callee(&mut self, value: Expr) -> Callee {
+        match self.shallow(&value.ty) {
+            Ty::Fn(..) => Callee::Value(value),
+            ty @ Ty::Named(def, _) if matches!(self.defs[def].kind, DefKind::ExternType { .. }) => {
+                let method = self.find_py_method(def, "__call__");
+                let value = self.dynamic(value);
+                Callee::Py(value, method, Some(ty))
+            }
+            _ => {
+                let value = self.dynamic(value);
+                Callee::Py(value, None, None)
+            }
+        }
+    }
+
+    fn method_callee(&mut self, target: Expr, name: &str, pos: Pos) -> Option<Callee> {
+        let ty = self.shallow(&target.ty);
+        let attr = |this: &mut Self, target: Expr| node(Ty::Dyn, ExprKind::PyAttr(boxed(this.dynamic(target)), name.to_string()), pos);
+        match &ty {
+            Ty::Dyn | Ty::Error => return Some(Callee::Py(attr(self, target), None, None)),
+            Ty::Named(def, _) if name == "copy" && matches!(self.defs[*def].kind, DefKind::Struct { .. }) => return Some(Callee::Copy(target, *def)),
+            Ty::Named(def, _) if matches!(self.defs[*def].kind, DefKind::PyClass { .. } | DefKind::ExternType { .. }) => {
+                let method = self.find_py_method(*def, name);
+                return Some(Callee::Py(attr(self, target), method, Some(ty.clone())));
+            }
+            Ty::Param(index) => {
+                let bounds = self.f.bounds.get(*index as usize).cloned().unwrap_or_default();
+                if let Some((method, args)) = bounds.iter().find_map(|(b, args)| Some((self.trait_method(*b, name)?, args.clone()))) {
+                    return Some(Callee::Trait(target, method, args));
+                }
+            }
+            _ => {}
+        }
+        if let Some(method) = self.find_method(&ty, name) {
+            return Some(Callee::Native(method, Some(target)));
+        }
+        if let Ty::Named(def, args) = &ty {
+            if let Some(index) = self.fields_of(*def).iter().position(|f| f.name.as_deref() == Some(name)) {
+                let field_ty = self.fields_of(*def)[index].ty.subst(args);
+                if matches!(self.shallow(&field_ty), Ty::Fn(..)) {
+                    return Some(Callee::Value(node(field_ty, ExprKind::Field(boxed(target), *def, index), pos)));
+                }
+            }
+        }
+        let message = format!("{} has no method {name}", self.show(&ty));
+        self.error(pos, message);
+        None
+    }
+
+    fn apply(&mut self, callee: Callee, args: &[ast::Arg], pos: Pos, expected: Option<&Ty>) -> Expr {
+        match callee {
+            Callee::Native(def, receiver) => {
+                let sig = self.sig(def).clone();
+                let (params, ret, type_args) = self.instantiate(&sig);
+                let mut values = vec![];
+                let offset = receiver.is_some() as usize;
+                if let Some(receiver) = receiver {
+                    self.unify(&params[0], &receiver.ty);
+                    // A trait method used on a concrete type: the impl tells the trait's type arguments.
+                    if let Some(owner) = sig.owner.filter(|o| matches!(self.defs[*o].kind, DefKind::Trait { .. })) {
+                        if let Some(trait_args) = self.trait_args_for(&receiver.ty, owner) {
+                            for (arg, trait_arg) in type_args[1..].iter().zip(&trait_args) {
+                                self.unify(arg, trait_arg);
+                            }
+                        }
+                    }
+                    values.push(receiver);
+                }
+                let ret = if sig.is_async { Ty::Coroutine(Box::new(ret)) } else { ret };
+                self.hint(&ret, expected);
+                let matched = self.match_args(&sig.params[offset..], &params[offset..], args, pos);
+                values.extend(self.ordered(matched, &sig.params[offset..], pos));
+                self.check_bounds(&sig, &type_args, pos);
+                if sig.kind == FnKind::TraitMethod {
+                    return node(ret, ExprKind::TraitCall(def, type_args, values), pos);
+                }
+                node(ret, ExprKind::Call(def, type_args, values), pos)
+            }
+            Callee::Trait(receiver, method, trait_args) => {
+                let sig = self.sig(method).clone();
+                let (params, ret, type_args) = self.instantiate(&sig);
+                self.unify(&params[0], &receiver.ty);
+                for (arg, trait_arg) in type_args[1..].iter().zip(&trait_args) {
+                    self.unify(arg, trait_arg);
+                }
+                self.hint(&ret, expected);
+                let mut values = vec![receiver];
+                let matched = self.match_args(&sig.params[1..], &params[1..], args, pos);
+                values.extend(self.ordered(matched, &sig.params[1..], pos));
+                node(ret, ExprKind::TraitCall(method, type_args, values), pos)
+            }
+            Callee::Construct(def) => {
+                let (owner, fields) = match &self.defs[def].kind {
+                    DefKind::Variant { parent, fields } => (*parent, fields.clone()),
+                    _ => (def, self.fields_of(def).to_vec()),
+                };
+                let ty = self.fresh_named(owner);
+                self.hint(&ty, expected);
+                let Ty::Named(_, type_args) = &ty else { unreachable!() };
+                let params: Vec<Param> = fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| Param { name: f.name.clone().unwrap_or_else(|| i.to_string()), ty: f.ty.clone(), default: f.default.clone(), optional: false, kind: ast::ParamKind::Normal })
+                    .collect();
+                let tys: Vec<Ty> = params.iter().map(|p| p.ty.subst(type_args)).collect();
+                let matched = self.match_args(&params, &tys, args, pos);
+                let values = self.ordered(matched, &params, pos);
+                node(ty, ExprKind::Construct(def, values), pos)
+            }
+            Callee::Copy(target, def) => {
+                let Ty::Named(_, type_args) = self.shallow(&target.ty) else { unreachable!() };
+                let fields = self.fields_of(def).to_vec();
+                let mut updates = vec![];
+                for arg in args {
+                    let ast::Arg::Named(name, value) = arg else {
+                        self.error(pos, "copy only takes named arguments");
+                        continue;
+                    };
+                    let Some(index) = fields.iter().position(|f| f.name.as_deref() == Some(name)) else {
+                        self.error(value.pos, format!("{} has no field {name}", self.defs[def].name));
+                        continue;
+                    };
+                    let ty = fields[index].ty.subst(&type_args);
+                    let value = self.check_expr(value, Some(&ty));
+                    updates.push((index, self.coerce(value, &ty)));
+                }
+                let ty = target.ty.clone();
+                node(ty, ExprKind::CopyWith(boxed(target), def, updates), pos)
+            }
+            Callee::Value(value) => {
+                let Ty::Fn(params, ret) = self.shallow(&value.ty) else { unreachable!() };
+                let infos: Vec<Param> = params.iter().enumerate().map(|(i, ty)| Param { name: i.to_string(), ty: ty.clone(), default: None, optional: false, kind: ast::ParamKind::Normal }).collect();
+                if args.iter().any(|a| !matches!(a, ast::Arg::Pos(_))) {
+                    self.error(pos, "function values only take positional arguments");
+                }
+                let matched = self.match_args(&infos, &params, args, pos);
+                let values = self.ordered(matched, &infos, pos);
+                node(*ret, ExprKind::CallValue(boxed(value), values), pos)
+            }
+            Callee::Py(function, sig_def, receiver) => {
+                let typed = sig_def.map(|def| {
+                    let sig = self.sig(def).clone();
+                    let skip = (sig.kind == FnKind::PyMethod || sig.owner.is_some_and(|o| matches!(self.defs[o].kind, DefKind::PyClass { .. }))) as usize;
+                    (sig, skip)
+                });
+                let function = self.dynamic(function);
+                match typed {
+                    Some((sig, skip)) => {
+                        let (params, ret, _) = self.instantiate(&sig);
+                        let skip = skip.min(params.len());
+                        if let (Some(receiver), 1) = (&receiver, skip) {
+                            self.unify(&params[0], receiver);
+                        }
+                        self.hint(&ret, expected);
+                        let py_args = self.py_args(&sig.params[skip..], &params[skip..], args, pos);
+                        let call = node(Ty::Dyn, ExprKind::PyCall(boxed(function), py_args), pos);
+                        let ret = if sig.is_async { Ty::Coroutine(Box::new(ret)) } else { ret };
+                        self.typed(call, ret)
+                    }
+                    None => {
+                        let py_args = self.untyped_args(args);
+                        node(Ty::Dyn, ExprKind::PyCall(boxed(function), py_args), pos)
+                    }
+                }
+            }
+            Callee::PyConstruct(class, def) => {
+                let ty = self.fresh_named(def);
+                let Ty::Named(_, type_args) = &ty else { unreachable!() };
+                let init = self.find_py_method(def, "__init__");
+                let class = self.dynamic(class);
+                let py_args = match init {
+                    Some(init) => {
+                        let sig = self.sig(init).clone();
+                        let mut all_args = type_args.clone();
+                        all_args.extend(sig.generics[type_args.len().min(sig.generics.len())..].iter().map(|_| self.fresh()));
+                        let params: Vec<Ty> = sig.params.iter().map(|p| p.ty.subst(&all_args)).collect();
+                        let skip = (!params.is_empty()) as usize;
+                        self.py_args(&sig.params[skip..], &params[skip..], args, pos)
+                    }
+                    None => self.untyped_args(args),
+                };
+                let call = node(Ty::Dyn, ExprKind::PyCall(boxed(class), py_args), pos);
+                Expr { ty, ..call }
+            }
+        }
+    }
+
+    fn check_bounds(&mut self, sig: &FnSig, type_args: &[Ty], pos: Pos) {
+        for ((_, bounds), arg) in sig.generics.iter().zip(type_args) {
+            for (bound, bound_args) in bounds {
+                match self.trait_args_for(arg, *bound) {
+                    Some(actual) => {
+                        for (have, want) in actual.iter().zip(bound_args) {
+                            self.unify(have, &want.subst(type_args));
+                        }
+                    }
+                    None => {
+                        let message = format!("{} does not implement {}", self.show(arg), self.defs[*bound].name);
+                        self.error(pos, message);
+                    }
+                }
+            }
+        }
+    }
+
+    fn untyped_args(&mut self, args: &[ast::Arg]) -> Vec<PyArg> {
+        args.iter()
+            .map(|arg| {
+                let (value, wrap): (&ast::Expr, fn(Expr) -> PyArg) = match arg {
+                    ast::Arg::Pos(value) => (value, PyArg::Pos),
+                    ast::Arg::Star(value) => (value, PyArg::Star),
+                    ast::Arg::StarStar(value) => (value, PyArg::StarStar),
+                    ast::Arg::Named(name, value) => {
+                        let value = self.check_expr(value, Some(&Ty::Dyn));
+                        let value = self.dynamic(value);
+                        return PyArg::Named(name.clone(), value);
+                    }
+                };
+                let value = self.check_expr(value, Some(&Ty::Dyn));
+                wrap(self.dynamic(value))
+            })
+            .collect()
+    }
+
+    fn py_args(&mut self, infos: &[Param], tys: &[Ty], args: &[ast::Arg], pos: Pos) -> Vec<PyArg> {
+        let star = infos.iter().position(|p| p.kind == ast::ParamKind::Star);
+        let has_kwargs = infos.iter().any(|p| p.kind == ast::ParamKind::StarStar);
+        let regular: Vec<usize> = (0..infos.len()).filter(|i| infos[*i].kind == ast::ParamKind::Normal).collect();
+        let mut used = vec![false; infos.len()];
+        let mut next = 0;
+        let mut result = vec![];
+        let mut lambdas = vec![];
+        for (index, arg) in args.iter().enumerate() {
+            let (slot, value) = match arg {
+                ast::Arg::Pos(value) => {
+                    let slot = if next < regular.len() {
+                        next += 1;
+                        Some(regular[next - 1])
+                    } else {
+                        star
+                    };
+                    if slot.is_none() {
+                        self.error(value.pos, "too many arguments");
+                    }
+                    (slot, value)
+                }
+                ast::Arg::Named(name, value) => {
+                    let slot = regular.iter().copied().find(|i| infos[*i].name == *name);
+                    if slot.is_none() && !has_kwargs {
+                        self.error(value.pos, format!("unknown argument {name}"));
+                    }
+                    (slot, value)
+                }
+                ast::Arg::Star(value) | ast::Arg::StarStar(value) => (None, value),
+            };
+            if let Some(slot) = slot {
+                used[slot] = true;
+            }
+            if matches!(value.kind, ast::ExprKind::Lambda(..)) {
+                lambdas.push((index, slot, value));
+                result.push(None);
+                continue;
+            }
+            result.push(Some(self.py_arg(arg, slot.map(|s| &tys[s]), value)));
+        }
+        for (index, slot, value) in lambdas {
+            result[index] = Some(self.py_arg(&args[index], slot.map(|s| &tys[s]), value));
+        }
+        for (i, info) in infos.iter().enumerate() {
+            if info.kind == ast::ParamKind::Normal && !used[i] && !info.optional && info.default.is_none() {
+                self.error(pos, format!("missing argument {}", info.name));
+            }
+        }
+        result.into_iter().flatten().collect()
+    }
+
+    fn py_arg(&mut self, arg: &ast::Arg, ty: Option<&Ty>, value: &ast::Expr) -> PyArg {
+        let ty = ty.cloned().unwrap_or(Ty::Dyn);
+        let checked = self.check_expr(value, Some(&ty));
+        let checked = self.coerce(checked, &ty);
+        let checked = self.dynamic(checked);
+        match arg {
+            ast::Arg::Named(name, _) => PyArg::Named(name.clone(), checked),
+            ast::Arg::Star(_) => PyArg::Star(checked),
+            ast::Arg::StarStar(_) => PyArg::StarStar(checked),
+            ast::Arg::Pos(_) => PyArg::Pos(checked),
+        }
+    }
+
+    fn match_args(&mut self, infos: &[Param], tys: &[Ty], args: &[ast::Arg], pos: Pos) -> Vec<Option<Expr>> {
+        let mut slots: Vec<Option<&ast::Expr>> = vec![None; infos.len()];
+        let mut next = 0;
+        for arg in args {
+            match arg {
+                ast::Arg::Pos(value) => {
+                    if next >= infos.len() {
+                        self.error(value.pos, "too many arguments");
+                    } else {
+                        slots[next] = Some(value);
+                    }
+                    next += 1;
+                }
+                ast::Arg::Named(name, value) => match infos.iter().position(|p| p.name == *name) {
+                    Some(index) if slots[index].is_some() => self.error(value.pos, format!("argument {name} given twice")),
+                    Some(index) => slots[index] = Some(value),
+                    None => self.error(value.pos, format!("unknown argument {name}")),
+                },
+                ast::Arg::Star(value) | ast::Arg::StarStar(value) => self.error(value.pos, "spread arguments are only allowed in python calls"),
+            }
+        }
+        let mut values: Vec<Option<Expr>> = vec![None; infos.len()];
+        for lambdas in [false, true] {
+            for (index, slot) in slots.iter().enumerate() {
+                let Some(value) = slot else { continue };
+                if matches!(value.kind, ast::ExprKind::Lambda(..)) != lambdas {
+                    continue;
+                }
+                let checked = self.check_expr(value, Some(&tys[index]));
+                values[index] = Some(self.coerce(checked, &tys[index]));
+            }
+        }
+        for (index, info) in infos.iter().enumerate() {
+            if values[index].is_none() && slots[index].is_none() && info.default.is_none() && !info.optional {
+                self.error(pos, format!("missing argument {}", info.name));
+            }
+        }
+        values
+    }
+
+    fn ordered(&mut self, matched: Vec<Option<Expr>>, infos: &[Param], pos: Pos) -> Vec<Expr> {
+        matched
+            .into_iter()
+            .zip(infos)
+            .map(|(value, info)| value.or_else(|| info.default.clone()).unwrap_or_else(|| node(Ty::Error, ExprKind::Unit, pos)))
+            .collect()
+    }
+
+    fn index_parts(&mut self, args: &[ast::IndexArg]) -> Vec<PyIndexPart> {
+        let dynamic = |this: &mut Self, expr: &Option<ast::Expr>| {
+            expr.as_ref().map(|e| {
+                let value = this.check_expr(e, None);
+                boxed(this.dynamic(value))
+            })
+        };
+        args.iter()
+            .map(|arg| match arg {
+                ast::IndexArg::Expr(e) => {
+                    let value = self.check_expr(e, None);
+                    PyIndexPart::Expr(self.dynamic(value))
+                }
+                ast::IndexArg::Slice(start, stop, step) => PyIndexPart::Slice(dynamic(self, start), dynamic(self, stop), dynamic(self, step)),
+                ast::IndexArg::Ellipsis => PyIndexPart::Ellipsis,
+            })
+            .collect()
+    }
 }
