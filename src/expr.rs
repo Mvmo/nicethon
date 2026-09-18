@@ -1602,4 +1602,196 @@ impl Checker {
             })
             .collect()
     }
+
+    // Match and patterns:
+
+    fn check_match(&mut self, scrutinee: &ast::Expr, arms: &[ast::Arm], expected: Option<&Ty>, pos: Pos) -> Expr {
+        let scrutinee = self.check_expr(scrutinee, None);
+        let ty = scrutinee.ty.clone();
+        let mut result = None;
+        let mut checked = vec![];
+        for arm in arms {
+            let arm = self.scoped(|this| {
+                let pattern = this.check_pattern(&arm.pattern, &ty);
+                let guard = arm.guard.as_ref().map(|g| this.check_cond(g));
+                let body = this.check_expr(&arm.body, expected);
+                let body = this.branch(body, expected, &mut result);
+                Arm { pattern, guard, body }
+            });
+            checked.push(arm);
+        }
+        self.check_exhaustive(&ty, &checked, pos);
+        let ty = result.unwrap_or(Ty::Never);
+        node(ty, ExprKind::Match(boxed(scrutinee), checked), pos)
+    }
+
+    pub fn irrefutable(&self, pattern: &Pattern) -> bool {
+        match &pattern.kind {
+            PatKind::Wild | PatKind::Bind(_) => true,
+            PatKind::Tuple(items) => items.iter().all(|p| self.irrefutable(p)),
+            PatKind::Or(alternatives) => alternatives.iter().any(|p| self.irrefutable(p)),
+            PatKind::Variant(def, fields) => {
+                let single = match &self.defs[*def].kind {
+                    DefKind::Variant { parent, .. } => matches!(&self.defs[*parent].kind, DefKind::Enum { variants, .. } if variants.len() == 1),
+                    _ => true,
+                };
+                single && fields.iter().all(|(_, p)| self.irrefutable(p))
+            }
+            _ => false,
+        }
+    }
+
+    pub fn check_pattern(&mut self, pattern: &ast::Pattern, ty: &Ty) -> Pattern {
+        let pos = pattern.pos;
+        let kind = match &pattern.kind {
+            ast::PatKind::Wild => PatKind::Wild,
+            ast::PatKind::Lit(literal) => {
+                let value = self.check_expr(literal, Some(ty));
+                let value = self.coerce(value, ty);
+                PatKind::Lit(boxed(value))
+            }
+            ast::PatKind::Ident(name) => {
+                let variant = match self.shallow(ty) {
+                    Ty::Named(def, _) => match &self.defs[def].kind {
+                        DefKind::Enum { variants, .. } => variants.iter().copied().find(|v| self.defs[*v].name == *name),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                match variant {
+                    Some(variant) => PatKind::Variant(variant, vec![]),
+                    None if name == "None" && matches!(self.shallow(ty), Ty::Dyn) => PatKind::PyNone,
+                    None => PatKind::Bind(self.declare_local(name, ty.clone(), false)),
+                }
+            }
+            ast::PatKind::TypeTest(name, target) => {
+                if !matches!(self.shallow(ty), Ty::Dyn | Ty::Error) {
+                    let message = format!("type tests need a Dyn value, found {}", self.show(ty));
+                    self.error(pos, message);
+                }
+                let target = self.resolve_here(target);
+                PatKind::TypeTest(self.declare_local(name, target, false))
+            }
+            ast::PatKind::Ctor(path, subs) => self.ctor_pattern(path, subs, ty, pos),
+            ast::PatKind::Tuple(subs) => {
+                let items = match self.shallow(ty) {
+                    Ty::Tuple(items) if items.len() == subs.len() => items,
+                    Ty::Var(_) => {
+                        let items: Vec<Ty> = subs.iter().map(|_| self.fresh()).collect();
+                        self.unify(ty, &Ty::Tuple(items.clone()));
+                        items
+                    }
+                    other => {
+                        let message = format!("tuple pattern does not match {}", self.show(&other));
+                        self.error(pos, message);
+                        vec![Ty::Error; subs.len()]
+                    }
+                };
+                let patterns = subs.iter().zip(&items).map(|(sub, item)| self.sub_pattern(sub, item)).collect();
+                PatKind::Tuple(patterns)
+            }
+            ast::PatKind::List(subs) => {
+                let item = match self.shallow(ty) {
+                    Ty::List(item) => *item,
+                    other => {
+                        let message = format!("list pattern does not match {}", self.show(&other));
+                        self.error(pos, message);
+                        Ty::Error
+                    }
+                };
+                let rest = matches!(subs.last(), Some(ast::SubPat::Rest));
+                let items = subs.iter().filter(|s| !matches!(s, ast::SubPat::Rest)).map(|sub| self.sub_pattern(sub, &item)).collect();
+                PatKind::List(items, rest)
+            }
+            ast::PatKind::Or(alternatives) => {
+                let before = self.f.locals.len();
+                let patterns = alternatives.iter().map(|alt| self.check_pattern(alt, ty)).collect();
+                if self.f.locals.len() != before {
+                    self.error(pos, "alternatives in a pattern cannot bind names");
+                }
+                PatKind::Or(patterns)
+            }
+        };
+        Pattern { ty: ty.clone(), kind }
+    }
+
+    fn sub_pattern(&mut self, sub: &ast::SubPat, ty: &Ty) -> Pattern {
+        match sub {
+            ast::SubPat::Pat(pattern) | ast::SubPat::Named(_, pattern) => self.check_pattern(pattern, ty),
+            ast::SubPat::Rest => Pattern { ty: ty.clone(), kind: PatKind::Wild },
+        }
+    }
+
+    fn ctor_pattern(&mut self, path: &[String], subs: &[ast::SubPat], ty: &Ty, pos: Pos) -> PatKind {
+        let scrutinee = self.shallow(ty);
+        let from_type = match (&scrutinee, path) {
+            (Ty::Named(def, _), [name]) => match &self.defs[*def].kind {
+                DefKind::Enum { variants, .. } => variants.iter().copied().find(|v| self.defs[*v].name == *name),
+                DefKind::Struct { .. } if self.defs[*def].name == *name => Some(*def),
+                _ => None,
+            },
+            _ => None,
+        };
+        let def = from_type.or_else(|| match (self.lookup(&path[0]), path.len()) {
+            (Some(Binding::Def(def)), 1) => Some(def),
+            (Some(Binding::Def(def)), 2) => match &self.defs[def].kind {
+                DefKind::Enum { variants, .. } => variants.iter().copied().find(|v| self.defs[*v].name == path[1]),
+                _ => None,
+            },
+            _ => None,
+        });
+        let Some(def) = def.filter(|d| matches!(self.defs[*d].kind, DefKind::Variant { .. } | DefKind::Struct { .. })) else {
+            self.error(pos, format!("unknown variant {}", path.join(".")));
+            return PatKind::Wild;
+        };
+        let (owner, fields) = match &self.defs[def].kind {
+            DefKind::Variant { parent, fields } => (*parent, fields.clone()),
+            _ => (def, self.fields_of(def).to_vec()),
+        };
+        let named = self.fresh_named(owner);
+        if !self.unify(&named, ty) {
+            let message = format!("pattern {} does not match {}", path.join("."), self.show(ty));
+            self.error(pos, message);
+        }
+        let Ty::Named(_, type_args) = named else { unreachable!() };
+        let has_rest = subs.iter().any(|s| matches!(s, ast::SubPat::Rest));
+        let positional = subs.iter().filter(|s| matches!(s, ast::SubPat::Pat(_))).count();
+        if !has_rest && subs.len() != fields.len() {
+            self.error(pos, format!("{} has {} fields, the pattern has {}", path.join("."), fields.len(), subs.len()));
+        }
+        let mut result = vec![];
+        for (index, sub) in subs.iter().enumerate() {
+            let field = match sub {
+                ast::SubPat::Rest => continue,
+                ast::SubPat::Pat(_) if index < positional && index < fields.len() => index,
+                ast::SubPat::Named(name, _) => match fields.iter().position(|f| f.name.as_deref() == Some(name)) {
+                    Some(field) => field,
+                    None => {
+                        self.error(pos, format!("{} has no field {name}", path.join(".")));
+                        continue;
+                    }
+                },
+                ast::SubPat::Pat(_) => continue,
+            };
+            let field_ty = fields[field].ty.subst(&type_args);
+            result.push((field, self.sub_pattern(sub, &field_ty)));
+        }
+        PatKind::Variant(def, result)
+    }
+}
+
+fn path_text(expr: &ast::Expr) -> String {
+    match &expr.kind {
+        ast::ExprKind::Name(name) => name.clone(),
+        ast::ExprKind::Member(object, field) => format!("{}.{field}", path_text(object)),
+        ast::ExprKind::SelfValue => "self".into(),
+        _ => "expression".into(),
+    }
+}
+
+fn pattern_pos(stmt: &ast::Stmt) -> Pos {
+    match stmt {
+        ast::Stmt::Let(pattern, ..) => pattern.pos,
+        _ => 0,
+    }
 }
