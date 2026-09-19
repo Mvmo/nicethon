@@ -1,0 +1,243 @@
+// Prelude: visible in every module. Functions without a body are
+// intrinsics implemented in runtime/nicethon.h.
+
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+impl<T> Option<T> {
+    fn unwrap(self) -> T {
+        match self {
+            Some(value) => value,
+            None => panic("called unwrap on None"),
+        }
+    }
+
+    fn unwrap_or(self, fallback: T) -> T {
+        match self {
+            Some(value) => value,
+            None => fallback,
+        }
+    }
+
+    fn is_some(self) -> Bool {
+        match self {
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    fn is_none(self) -> Bool {
+        !self.is_some()
+    }
+
+    fn map<U>(self, function: (T) -> U) -> Option<U> {
+        match self {
+            Some(value) => Some(function(value)),
+            None => None,
+        }
+    }
+}
+
+enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+impl<T, E> Result<T, E> {
+    fn unwrap(self) -> T {
+        match self {
+            Ok(value) => value,
+            Err(_) => panic("called unwrap on Err"),
+        }
+    }
+
+    fn unwrap_or(self, fallback: T) -> T {
+        match self {
+            Ok(value) => value,
+            Err(_) => fallback,
+        }
+    }
+
+    fn is_ok(self) -> Bool {
+        match self {
+            Ok(_) => true,
+            Err(_) => false,
+        }
+    }
+
+    fn is_err(self) -> Bool {
+        !self.is_ok()
+    }
+
+    fn ok(self) -> Option<T> {
+        match self {
+            Ok(value) => Some(value),
+            Err(_) => None,
+        }
+    }
+
+    fn map<U>(self, function: (T) -> U) -> Result<U, E> {
+        match self {
+            Ok(value) => Ok(function(value)),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn map_err<F>(self, function: (E) -> F) -> Result<T, F> {
+        match self {
+            Ok(value) => Ok(value),
+            Err(error) => Err(function(error)),
+        }
+    }
+}
+
+struct PyErr {
+    message: Str;
+    type_name: Str;
+    value: Dyn;
+}
+
+trait Eq {}
+trait Ord {}
+trait Hash {}
+trait Show {}
+
+fn print<T>(value: T);
+fn panic(message: Str) -> Never;
+fn str<T>(value: T) -> Str;
+fn sum<T>(items: List<T>) -> T;
+
+fn map<T, U>(items: List<T>, function: (T) -> U) -> List<U> {
+    items.map(function)
+}
+
+fn filter<T>(items: List<T>, keep: (T) -> Bool) -> List<T> {
+    items.filter(keep)
+}
+
+fn fold<T, A>(items: List<T>, initial: A, function: (A, T) -> A) -> A {
+    items.fold(initial, function)
+}
+
+impl<T> List<T> {
+    fn len(self) -> Int;
+    fn push(self, item: T);
+    fn pop(self) -> Option<T>;
+    fn sort_by<K>(self, key: (T) -> K) -> List<T>;
+    fn sorted(self) -> List<T>;
+    fn reversed(self) -> List<T>;
+    fn join(self, separator: Str) -> Str;
+
+    fn is_empty(self) -> Bool {
+        self.len() == 0
+    }
+
+    fn get(self, index: Int) -> Option<T> {
+        if index >= 0 && index < self.len() { Some(self[index]) } else { None }
+    }
+
+    fn contains(self, item: T) -> Bool {
+        item in self
+    }
+
+    fn map<U>(self, function: (T) -> U) -> List<U> {
+        let result: List<U> = [];
+        for item in self {
+            result.push(function(item));
+        }
+        result
+    }
+
+    fn filter(self, keep: (T) -> Bool) -> List<T> {
+        let result: List<T> = [];
+        for item in self {
+            if keep(item) {
+                result.push(item);
+            }
+        }
+        result
+    }
+
+    fn fold<A>(self, initial: A, function: (A, T) -> A) -> A {
+        var total = initial;
+        for item in self {
+            total = function(total, item);
+        }
+        total
+    }
+
+    fn any(self, check: (T) -> Bool) -> Bool {
+        for item in self {
+            if check(item) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn all(self, check: (T) -> Bool) -> Bool {
+        for item in self {
+            if !check(item) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl Str {
+    fn len(self) -> Int;
+    fn upper(self) -> Str;
+    fn lower(self) -> Str;
+    fn trim(self) -> Str;
+    fn split(self, separator: Str) -> List<Str>;
+    fn replace(self, old: Str, new: Str) -> Str;
+    fn starts_with(self, prefix: Str) -> Bool;
+    fn ends_with(self, suffix: Str) -> Bool;
+    fn parse_int(self) -> Option<Int>;
+    fn parse_float(self) -> Option<Float>;
+
+    fn is_empty(self) -> Bool {
+        self.len() == 0
+    }
+
+    fn contains(self, part: Str) -> Bool {
+        part in self
+    }
+}
+
+impl Int {
+    fn abs(self) -> Int {
+        if self < 0 { -self } else { self }
+    }
+
+    fn min(self, other: Int) -> Int {
+        if self < other { self } else { other }
+    }
+
+    fn max(self, other: Int) -> Int {
+        if self > other { self } else { other }
+    }
+}
+
+impl Float {
+    fn floor(self) -> Float;
+    fn ceil(self) -> Float;
+    fn sqrt(self) -> Float;
+    fn abs(self) -> Float;
+    fn round(self) -> Float;
+}
+
+impl<K, V> Map<K, V> {
+    fn len(self) -> Int;
+    fn get(self, key: K) -> Option<V>;
+    fn remove(self, key: K) -> Option<V>;
+    fn keys(self) -> List<K>;
+    fn values(self) -> List<V>;
+
+    fn contains(self, key: K) -> Bool {
+        key in self
+    }
+}
