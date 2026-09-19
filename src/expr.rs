@@ -1641,6 +1641,89 @@ impl Checker {
         }
     }
 
+    fn check_exhaustive(&mut self, ty: &Ty, arms: &[Arm], pos: Pos) {
+        let rows = arms.iter().filter(|arm| arm.guard.is_none()).map(|arm| vec![arm.pattern.clone()]).collect();
+        if let Some(witness) = self.uncovered(rows, &[self.deep(ty)]) {
+            self.error(pos, format!("non-exhaustive match: {} not covered", witness[0]));
+        }
+    }
+
+    // Pattern matrix check: returns example values (one per column) that no
+    // row matches, or None when the rows cover everything.
+    fn uncovered(&self, rows: Vec<Vec<Pattern>>, tys: &[Ty]) -> Option<Vec<String>> {
+        let Some((first, rest)) = tys.split_first() else {
+            return rows.is_empty().then(Vec::new);
+        };
+        let mut expanded = vec![];
+        for row in rows {
+            match &row[0].kind {
+                PatKind::Or(alternatives) => expanded.extend(alternatives.iter().map(|alternative| [vec![alternative.clone()], row[1..].to_vec()].concat())),
+                _ => expanded.push(row),
+            }
+        }
+        let wild = |pattern: &Pattern| matches!(pattern.kind, PatKind::Wild | PatKind::Bind(_));
+        let constructors = self.constructors(first);
+        if let Some(constructors) = constructors.filter(|_| expanded.iter().any(|row| !wild(&row[0]))) {
+            for (constructor, name, fields) in constructors {
+                let rows = expanded
+                    .iter()
+                    .filter_map(|row| Some([self.specialize(&row[0], &constructor, &fields)?, row[1..].to_vec()].concat()))
+                    .collect();
+                if let Some(witness) = self.uncovered(rows, &[fields.clone(), rest.to_vec()].concat()) {
+                    let (inner, outer) = witness.split_at(fields.len());
+                    let shown = match constructor {
+                        Constructor::Tuple => format!("({})", inner.join(", ")),
+                        _ if inner.is_empty() => name,
+                        _ => format!("{name}({})", inner.join(", ")),
+                    };
+                    return Some([vec![shown], outer.to_vec()].concat());
+                }
+            }
+            return None;
+        }
+        let rows = expanded.into_iter().filter(|row| wild(&row[0])).map(|row| row[1..].to_vec()).collect();
+        let mut witness = self.uncovered(rows, rest)?;
+        let example = match self.constructors(first).and_then(|c| c.into_iter().next()) {
+            Some((_, name, fields)) if fields.is_empty() => name,
+            Some((Constructor::Tuple, _, fields)) => format!("({})", vec!["_"; fields.len()].join(", ")),
+            Some((_, name, fields)) => format!("{name}({})", vec!["_"; fields.len()].join(", ")),
+            None => "_".into(),
+        };
+        witness.insert(0, example);
+        Some(witness)
+    }
+
+    fn constructors(&self, ty: &Ty) -> Option<Vec<(Constructor, String, Vec<Ty>)>> {
+        let fields = |def: DefId, args: &[Ty]| self.fields_of(def).iter().map(|f| f.ty.subst(args)).collect::<Vec<_>>();
+        match self.shallow(ty) {
+            Ty::Bool => Some(vec![(Constructor::Bool(true), "true".into(), vec![]), (Constructor::Bool(false), "false".into(), vec![])]),
+            Ty::Tuple(items) => Some(vec![(Constructor::Tuple, String::new(), items)]),
+            Ty::Named(def, args) => match &self.defs[def].kind {
+                DefKind::Enum { variants, .. } => Some(variants.iter().map(|v| (Constructor::Variant(*v), self.defs[*v].name.clone(), fields(*v, &args))).collect()),
+                DefKind::Struct { .. } => Some(vec![(Constructor::Variant(def), self.defs[def].name.clone(), fields(def, &args))]),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn specialize(&self, pattern: &Pattern, constructor: &Constructor, fields: &[Ty]) -> Option<Vec<Pattern>> {
+        let wilds = || fields.iter().map(|ty| Pattern { ty: ty.clone(), kind: PatKind::Wild }).collect::<Vec<_>>();
+        match (&pattern.kind, constructor) {
+            (PatKind::Wild | PatKind::Bind(_), _) => Some(wilds()),
+            (PatKind::Variant(def, subs), Constructor::Variant(expected)) if def == expected => {
+                let mut result = wilds();
+                for (index, sub) in subs {
+                    result[*index] = sub.clone();
+                }
+                Some(result)
+            }
+            (PatKind::Tuple(items), Constructor::Tuple) => Some(items.clone()),
+            (PatKind::Lit(literal), Constructor::Bool(value)) => matches!(literal.kind, ExprKind::Bool(b) if b == *value).then(Vec::new),
+            _ => None,
+        }
+    }
+
     pub fn check_pattern(&mut self, pattern: &ast::Pattern, ty: &Ty) -> Pattern {
         let pos = pattern.pos;
         let kind = match &pattern.kind {
