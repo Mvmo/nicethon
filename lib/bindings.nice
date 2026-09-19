@@ -1,0 +1,110 @@
+// Types for parts of the python stdlib. Modules without an entry here are Dyn.
+
+extern py "builtins" {
+    type BaseException { fn __init__(self, message: Str); }
+    type Exception : BaseException { fn __init__(self, message: Str); }
+    type ValueError : Exception { fn __init__(self, message: Str); }
+    type TypeError : Exception { fn __init__(self, message: Str); }
+    type KeyError : Exception { fn __init__(self, key: Dyn); }
+    type IndexError : Exception { fn __init__(self, message: Str); }
+    type RuntimeError : Exception { fn __init__(self, message: Str); }
+    type ZeroDivisionError : Exception { fn __init__(self, message: Str); }
+    type AttributeError : Exception { fn __init__(self, message: Str); }
+    type NotImplementedError : Exception { fn __init__(self, message: Str); }
+    type OSError : Exception { fn __init__(self, message: Str); }
+    type FileNotFoundError : OSError { fn __init__(self, message: Str); }
+    type BufferError : Exception { fn __init__(self, message: Str); }
+    fn sorted<T, K>(items: List<T>, key?: (T) -> K, reverse?: Bool) -> List<T>;
+    fn len(value: Dyn) -> Int;
+    fn repr(value: Dyn) -> Str;
+    fn isinstance(value: Dyn, kind: Dyn) -> Bool;
+    fn open(path: Str, mode?: Str, encoding?: Str) -> Dyn;
+    fn input(prompt?: Str) -> Str;
+    fn print(*values: Dyn, sep?: Str, end?: Str);
+}
+
+extern py "math" {
+    const pi: Float;
+    const e: Float;
+    const tau: Float;
+    const inf: Float;
+    fn sqrt(x: Float) -> Float;
+    fn floor(x: Float) -> Int;
+    fn ceil(x: Float) -> Int;
+    fn gcd(left: Int, right: Int) -> Int;
+    fn sin(x: Float) -> Float;
+    fn cos(x: Float) -> Float;
+    fn tan(x: Float) -> Float;
+    fn exp(x: Float) -> Float;
+    fn log(x: Float, base?: Float) -> Float;
+    fn hypot(x: Float, y: Float) -> Float;
+    fn isclose(left: Float, right: Float) -> Bool;
+}
+
+extern py "statistics" {
+    fn mean(data: List<Float>) -> Float;
+    fn median(data: List<Float>) -> Float;
+    fn pstdev(data: List<Float>) -> Float;
+    fn stdev(data: List<Float>) -> Float;
+}
+
+extern py "textwrap" {
+    fn wrap(text: Str, width?: Int) -> List<Str>;
+    fn fill(text: Str, width?: Int) -> Str;
+    fn dedent(text: Str) -> Str;
+}
+
+extern py "json" {
+    fn loads(text: Str) -> Dyn;
+    fn dumps(value: Dyn, indent?: Int) -> Str;
+}
+
+extern py "functools" {
+    type CacheWrapper<A, R> {
+        fn __call__(self, argument: A) -> R;
+        fn cache_info(self) -> Dyn;
+        fn cache_clear(self);
+    }
+    fn reduce<T>(function: (T, T) -> T, items: List<T>) -> T;
+    fn cache<A, R>(function: (A) -> R) -> CacheWrapper<A, R>;
+}
+
+extern py "io" {
+    type StringIO {
+        fn __init__(self, initial?: Str);
+        fn __enter__(self) -> StringIO;
+        fn write(self, text: Str) -> Int;
+        fn read(self) -> Str;
+        fn getvalue(self) -> Str;
+    }
+}
+
+extern py "asyncio" {
+    fn run<T>(main: Coroutine<T>) -> T;
+    fn sleep(delay: Float) -> Coroutine<()>;
+}
+
+extern py "html.parser" {
+    type HTMLParser {
+        fn __init__(self);
+        fn feed(self, data: Str);
+        fn close(self);
+    }
+}
+
+extern py "time" {
+    fn time() -> Float;
+    fn perf_counter() -> Float;
+    fn sleep(seconds: Float);
+}
+
+extern py "random" {
+    fn random() -> Float;
+    fn randint(low: Int, high: Int) -> Int;
+    fn seed(value: Int);
+}
+
+extern py "os" {
+    fn getcwd() -> Str;
+    fn listdir(path?: Str) -> List<Str>;
+}
