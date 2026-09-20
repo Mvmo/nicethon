@@ -661,3 +661,187 @@ static PyTypeObject nt_ListType = {
     .tp_iter = PySeqIter_New,
     .tp_methods = nt_list_methods,
 };
+
+// Boundary checks: a spec string describes the expected type.
+// i Int, f Float, b Bool, s Str, y Bytes, n BigInt, u Unit, d Dyn, F function,
+// L<item> List, S<item> Set, M<key><value> Map, O<some>;<none>; Option, T<count>;<items> tuple,
+// r<index>; record type, e<index>; enum.
+
+static int nt_spec_index(const char **spec) {
+    int index = 0;
+    while (**spec >= '0' && **spec <= '9') index = index * 10 + *(*spec)++ - '0';
+    if (**spec == ';') (*spec)++;
+    return index;
+}
+
+static void nt_skip_spec(const char **spec) {
+    char c = *(*spec)++;
+    switch (c) {
+    case 'L': case 'S': nt_skip_spec(spec); break;
+    case 'M': nt_skip_spec(spec); nt_skip_spec(spec); break;
+    case 'T': for (int n = nt_spec_index(spec); n > 0; n--) nt_skip_spec(spec); break;
+    case 'r': case 'e': nt_spec_index(spec); break;
+    case 'O': nt_spec_index(spec); nt_spec_index(spec); break;
+    }
+}
+
+static int nt_spec_kind(const char *spec) {
+    return spec[0] == 'i' ? NT_I64 : spec[0] == 'f' ? NT_F64 : spec[0] == 'b' ? NT_BOOL : NT_OBJ;
+}
+
+static PyTypeObject *nt_spec_type(const char *spec) {
+    if (spec[0] == 's') return &PyUnicode_Type;
+    if (spec[0] == 'r') {
+        const char *rest = spec + 1;
+        return nt_types[nt_spec_index(&rest)];
+    }
+    return NULL;
+}
+
+// Returns a new reference in Nicethon form. NULL without an error set means a
+// type mismatch, NULL with an error set means another failure.
+static PyObject *nt_convert(PyObject *value, const char **spec) {
+    char c = *(*spec)++;
+    switch (c) {
+    case 'd': return Py_NewRef(value);
+    case 'u': return value == Py_None ? Py_NewRef(value) : NULL;
+    case 'i': case 'n': {
+        if (PyBool_Check(value) || PyFloat_Check(value)) return NULL;
+        if (PyLong_CheckExact(value)) {
+            if (c == 'i') {
+                int overflow = 0;
+                PyLong_AsLongLongAndOverflow(value, &overflow);
+                if (overflow) return NULL;
+            }
+            return Py_NewRef(value);
+        }
+        if (!PyIndex_Check(value)) return NULL;
+        PyObject *number = PyNumber_Index(value);
+        if (!number) return NULL;
+        int overflow = 0;
+        if (c == 'i') PyLong_AsLongLongAndOverflow(number, &overflow);
+        if (overflow) {
+            Py_DECREF(number);
+            return NULL;
+        }
+        return number;
+    }
+    case 'f':
+        if (PyFloat_CheckExact(value)) return Py_NewRef(value);
+        if (PyBool_Check(value)) return NULL;
+        if (PyFloat_Check(value) || PyLong_Check(value) || Py_TYPE(value)->tp_as_number && Py_TYPE(value)->tp_as_number->nb_float) {
+            double number = PyFloat_AsDouble(value);
+            if (number == -1.0 && PyErr_Occurred()) {
+                PyErr_Clear();
+                return NULL;
+            }
+            return PyFloat_FromDouble(number);
+        }
+        return NULL;
+    case 'b':
+        if (PyBool_Check(value)) return Py_NewRef(value);
+        if (strcmp(Py_TYPE(value)->tp_name, "numpy.bool") == 0 || strcmp(Py_TYPE(value)->tp_name, "numpy.bool_") == 0)
+            return Py_NewRef(PyObject_IsTrue(value) ? Py_True : Py_False);
+        return NULL;
+    case 's': return PyUnicode_Check(value) ? Py_NewRef(value) : NULL;
+    case 'y': return PyBytes_Check(value) ? Py_NewRef(value) : NULL;
+    case 'F': return PyCallable_Check(value) ? Py_NewRef(value) : NULL;
+    case 'r': {
+        PyTypeObject *type = nt_types[nt_spec_index(spec)];
+        return Py_IS_TYPE(value, type) ? Py_NewRef(value) : NULL;
+    }
+    case 'e': {
+        int id = nt_spec_index(spec);
+        return nt_is_record(value) && NT_RECORD(value)->enum_id == id ? Py_NewRef(value) : NULL;
+    }
+    case 'O': {
+        PyTypeObject *some = nt_types[nt_spec_index(spec)], *none = nt_types[nt_spec_index(spec)];
+        if (Py_IS_TYPE(value, some) || Py_IS_TYPE(value, none)) return Py_NewRef(value);
+        if (value == Py_None) return nt_record_alloc(none);
+        const nt_Field *field = &((nt_RecordType *)some)->fields[0];
+        const char *inner = field->spec;
+        PyObject *item = nt_convert(value, &inner);
+        PyObject *record = item ? nt_record_alloc(some) : NULL;
+        if (record) nt_set_field(record, field, item);
+        Py_XDECREF(item);
+        return record;
+    }
+    case 'T': {
+        int count = nt_spec_index(spec);
+        if (!PyTuple_Check(value) || PyTuple_GET_SIZE(value) != count) {
+            for (int i = 0; i < count; i++) nt_skip_spec(spec);
+            return NULL;
+        }
+        PyObject *tuple = PyTuple_New(count);
+        for (int i = 0; tuple && i < count; i++) {
+            PyObject *item = nt_convert(PyTuple_GET_ITEM(value, i), spec);
+            if (!item) {
+                Py_CLEAR(tuple);
+                for (i++; i < count; i++) nt_skip_spec(spec);
+                break;
+            }
+            PyTuple_SET_ITEM(tuple, i, item);
+        }
+        return tuple;
+    }
+    case 'L': {
+        const char *inner = *spec;
+        nt_skip_spec(spec);
+        int kind = nt_spec_kind(inner);
+        PyTypeObject *item_type = nt_spec_type(inner);
+        if (Py_IS_TYPE(value, &nt_ListType)) {
+            nt_List *list = (nt_List *)value;
+            if (list->kind == kind && (inner[0] == 'd' || kind != NT_OBJ || (item_type && list->item_type == item_type)))
+                return Py_NewRef(value);
+        }
+        if (!PyList_Check(value) && !PyTuple_Check(value) && !Py_IS_TYPE(value, &nt_ListType)) return NULL;
+        Py_ssize_t length = PySequence_Length(value);
+        PyObject *list = nt_list_new(kind, length);
+        if (!list) return NULL;
+        ((nt_List *)list)->item_type = item_type;
+        for (Py_ssize_t i = 0; i < length; i++) {
+            PyObject *raw = PySequence_GetItem(value, i);
+            const char *cursor = inner;
+            PyObject *item = raw ? nt_convert(raw, &cursor) : NULL;
+            Py_XDECREF(raw);
+            if (!item || nt_list_append(list, item) < 0) {
+                Py_XDECREF(item);
+                Py_DECREF(list);
+                return NULL;
+            }
+            Py_DECREF(item);
+        }
+        return list;
+    }
+    case 'M': case 'S': {
+        nt_skip_spec(spec);
+        if (c == 'M') nt_skip_spec(spec);
+        if (c == 'M' ? PyDict_Check(value) : PyAnySet_Check(value)) return Py_NewRef(value);
+        return NULL;
+    }
+    }
+    return NULL;
+}
+
+static PyObject *nt_from_py(PyObject *value, const char *spec, const char *display, const char *context) {
+    const char *cursor = spec;
+    PyObject *result = nt_convert(value, &cursor);
+    if (result || PyErr_Occurred()) return result;
+    PyObject *found = nt_type_name(value);
+    if (context && context[0]) PyErr_Format(PyExc_TypeError, "argument '%s': expected %s, found %U", context, display, found);
+    else PyErr_Format(PyExc_TypeError, "expected %s, found %U", display, found);
+    Py_XDECREF(found);
+    return NULL;
+}
+
+static PyObject *nt_try_convert(PyObject *value, const char *spec) {
+    const char *cursor = spec;
+    PyObject *result = nt_convert(value, &cursor);
+    PyErr_Clear();
+    return result;
+}
+
+static PyObject *nt_option_to_py(PyObject *option) {
+    nt_RecordType *type = NT_RECORD(option);
+    return type->field_count == 0 ? Py_NewRef(Py_None) : nt_field_get(option, &type->fields[0]);
+}
