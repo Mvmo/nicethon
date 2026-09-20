@@ -352,3 +352,312 @@ static PyObject *nt_record_new(PyTypeObject *subtype, PyObject *args, PyObject *
       .tp_flags = Py_TPFLAGS_DEFAULT, .tp_dealloc = nt_record_dealloc, .tp_repr = nt_record_repr, \
       .tp_hash = nt_record_hash, .tp_richcompare = nt_record_richcompare, .tp_getattro = nt_record_getattro, \
       .tp_setattro = nt_record_setattro, .tp_new = nt_record_new}, show, count, fields, enum_id}
+
+// Lists: Int, Float and Bool elements are stored unboxed.
+
+#define NT_SLOT(list, index) (((int64_t *)((nt_List *)(list))->data) + (index))
+
+static PyObject *nt_list_new(int kind, Py_ssize_t capacity) {
+    nt_List *list = PyObject_New(nt_List, &nt_ListType);
+    if (!list) return NULL;
+    list->length = 0;
+    list->capacity = capacity > 4 ? capacity : 4;
+    list->kind = kind;
+    list->item_type = NULL;
+    list->data = PyMem_Malloc(list->capacity * 8);
+    if (!list->data) {
+        Py_DECREF(list);
+        return PyErr_NoMemory();
+    }
+    return (PyObject *)list;
+}
+
+static int nt_list_reserve(nt_List *list) {
+    if (list->length < list->capacity) return 0;
+    char *data = PyMem_Realloc(list->data, list->capacity * 2 * 8);
+    if (!data) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    list->data = data;
+    list->capacity *= 2;
+    return 0;
+}
+
+static int nt_list_index(PyObject *list, int64_t *index) {
+    Py_ssize_t length = ((nt_List *)list)->length;
+    if (*index < 0) *index += length;
+    if (*index < 0 || *index >= length) {
+        PyErr_Format(nt_panic_type, "index %lld out of range for length %zd", (long long)*index, length);
+        return -1;
+    }
+    return 0;
+}
+
+static PyObject *nt_list_item(PyObject *list, Py_ssize_t index) {
+    int64_t *slot = NT_SLOT(list, index);
+    switch (((nt_List *)list)->kind) {
+    case NT_I64: return PyLong_FromLongLong(*slot);
+    case NT_F64: return PyFloat_FromDouble(*(double *)slot);
+    case NT_BOOL: return PyBool_FromLong(*slot);
+    default: return Py_NewRef(*(PyObject **)slot);
+    }
+}
+
+static int nt_list_store(PyObject *list, Py_ssize_t index, PyObject *value, int fresh) {
+    nt_List *self = (nt_List *)list;
+    int64_t *slot = NT_SLOT(list, index);
+    switch (self->kind) {
+    case NT_I64: {
+        int overflow = 0;
+        long long number = PyLong_AsLongLongAndOverflow(value, &overflow);
+        if (overflow) return PyErr_SetString(PyExc_OverflowError, "Int out of range"), -1;
+        if (number == -1 && PyErr_Occurred()) return -1;
+        *slot = number;
+        return 0;
+    }
+    case NT_F64: {
+        double number = PyFloat_AsDouble(value);
+        if (number == -1.0 && PyErr_Occurred()) return -1;
+        *(double *)slot = number;
+        return 0;
+    }
+    case NT_BOOL: *slot = PyObject_IsTrue(value); return 0;
+    default:
+        if (fresh) *(PyObject **)slot = Py_NewRef(value);
+        else Py_SETREF(*(PyObject **)slot, Py_NewRef(value));
+        return 0;
+    }
+}
+
+static int nt_list_check_item(nt_List *list, PyObject *value) {
+    int ok;
+    switch (list->kind) {
+    case NT_I64: ok = PyLong_Check(value) && !PyBool_Check(value); break;
+    case NT_F64: ok = PyFloat_Check(value) || (PyLong_Check(value) && !PyBool_Check(value)); break;
+    case NT_BOOL: ok = PyBool_Check(value); break;
+    default: ok = !list->item_type || PyObject_TypeCheck(value, list->item_type);
+    }
+    if (!ok) {
+        PyObject *found = nt_type_name(value);
+        PyErr_Format(PyExc_TypeError, "list item: found %U", found);
+        Py_XDECREF(found);
+    }
+    return ok ? 0 : -1;
+}
+
+static int nt_list_append(PyObject *list, PyObject *value) {
+    nt_List *self = (nt_List *)list;
+    if (nt_list_reserve(self) < 0 || nt_list_store(list, self->length, value, 1) < 0) return -1;
+    self->length++;
+    return 0;
+}
+
+static int nt_list_append_i64(PyObject *list, int64_t value) {
+    nt_List *self = (nt_List *)list;
+    if (self->kind != NT_I64) {
+        PyObject *boxed = self->kind == NT_F64 ? PyFloat_FromDouble((double)value) : PyLong_FromLongLong(value);
+        int status = boxed ? nt_list_append(list, boxed) : -1;
+        Py_XDECREF(boxed);
+        return status;
+    }
+    if (nt_list_reserve(self) < 0) return -1;
+    *NT_SLOT(list, self->length++) = value;
+    return 0;
+}
+
+static int nt_list_append_f64(PyObject *list, double value) {
+    nt_List *self = (nt_List *)list;
+    if (self->kind != NT_F64) {
+        PyObject *boxed = PyFloat_FromDouble(value);
+        int status = boxed ? nt_list_append(list, boxed) : -1;
+        Py_XDECREF(boxed);
+        return status;
+    }
+    if (nt_list_reserve(self) < 0) return -1;
+    *(double *)NT_SLOT(list, self->length++) = value;
+    return 0;
+}
+
+static int nt_list_append_bool(PyObject *list, int value) {
+    return nt_list_append(list, value ? Py_True : Py_False);
+}
+
+static int64_t nt_list_get_i64(PyObject *list, int64_t index) {
+    if (nt_list_index(list, &index) < 0) return -1;
+    if (((nt_List *)list)->kind == NT_I64) return *NT_SLOT(list, index);
+    return PyLong_AsLongLong(*(PyObject **)NT_SLOT(list, index));
+}
+
+static double nt_list_get_f64(PyObject *list, int64_t index) {
+    if (nt_list_index(list, &index) < 0) return -1.0;
+    if (((nt_List *)list)->kind == NT_F64) return *(double *)NT_SLOT(list, index);
+    return PyFloat_AsDouble(*(PyObject **)NT_SLOT(list, index));
+}
+
+static int nt_list_get_bool(PyObject *list, int64_t index) {
+    if (nt_list_index(list, &index) < 0) return -1;
+    if (((nt_List *)list)->kind == NT_BOOL) return (int)*NT_SLOT(list, index);
+    return *(PyObject **)NT_SLOT(list, index) == Py_True;
+}
+
+static PyObject *nt_list_get_obj(PyObject *list, int64_t index) {
+    if (nt_list_index(list, &index) < 0) return NULL;
+    return nt_list_item(list, index);
+}
+
+static int nt_list_set(PyObject *list, int64_t index, PyObject *value) {
+    if (nt_list_index(list, &index) < 0) return -1;
+    return nt_list_store(list, index, value, 0);
+}
+
+static int nt_list_set_i64(PyObject *list, int64_t index, int64_t value) {
+    if (nt_list_index(list, &index) < 0) return -1;
+    if (((nt_List *)list)->kind == NT_I64) {
+        *NT_SLOT(list, index) = value;
+        return 0;
+    }
+    PyObject *boxed = PyLong_FromLongLong(value);
+    int status = boxed ? nt_list_store(list, index, boxed, 0) : -1;
+    Py_XDECREF(boxed);
+    return status;
+}
+
+static int nt_list_set_f64(PyObject *list, int64_t index, double value) {
+    if (nt_list_index(list, &index) < 0) return -1;
+    if (((nt_List *)list)->kind == NT_F64) {
+        *(double *)NT_SLOT(list, index) = value;
+        return 0;
+    }
+    PyObject *boxed = PyFloat_FromDouble(value);
+    int status = boxed ? nt_list_store(list, index, boxed, 0) : -1;
+    Py_XDECREF(boxed);
+    return status;
+}
+
+static int nt_list_set_bool(PyObject *list, int64_t index, int value) {
+    return nt_list_set(list, index, value ? Py_True : Py_False);
+}
+
+static Py_ssize_t nt_list_len(PyObject *list) {
+    return ((nt_List *)list)->length;
+}
+
+static PyObject *nt_range(int64_t start, int64_t end) {
+    PyObject *list = nt_list_new(NT_I64, end > start ? end - start : 0);
+    if (!list) return NULL;
+    for (int64_t i = start; i < end; i++) *NT_SLOT(list, i - start) = i;
+    ((nt_List *)list)->length = end > start ? end - start : 0;
+    return list;
+}
+
+static PyObject *nt_list_concat(PyObject *left, PyObject *right) {
+    nt_List *a = (nt_List *)left;
+    PyObject *result = nt_list_new(a->kind, a->length + ((nt_List *)right)->length);
+    if (!result) return NULL;
+    PyObject *sides[2] = {left, right};
+    for (int side = 0; side < 2; side++) {
+        for (Py_ssize_t i = 0; i < ((nt_List *)sides[side])->length; i++) {
+            PyObject *item = nt_list_item(sides[side], i);
+            int status = item ? nt_list_append(result, item) : -1;
+            Py_XDECREF(item);
+            if (status < 0) {
+                Py_DECREF(result);
+                return NULL;
+            }
+        }
+    }
+    return result;
+}
+
+static void nt_list_dealloc(PyObject *self) {
+    nt_List *list = (nt_List *)self;
+    if (list->kind == NT_OBJ)
+        for (Py_ssize_t i = 0; i < list->length; i++) Py_DECREF(*(PyObject **)NT_SLOT(self, i));
+    PyMem_Free(list->data);
+    PyObject_Free(self);
+}
+
+static Py_ssize_t nt_list_sq_length(PyObject *self) {
+    return ((nt_List *)self)->length;
+}
+
+static PyObject *nt_list_sq_item(PyObject *self, Py_ssize_t index) {
+    if (index < 0 || index >= ((nt_List *)self)->length) {
+        PyErr_SetString(PyExc_IndexError, "list index out of range");
+        return NULL;
+    }
+    return nt_list_item(self, index);
+}
+
+static int nt_list_sq_ass_item(PyObject *self, Py_ssize_t index, PyObject *value) {
+    if (!value) {
+        PyErr_SetString(PyExc_TypeError, "Nicethon lists do not support item deletion");
+        return -1;
+    }
+    if (index < 0 || index >= ((nt_List *)self)->length) {
+        PyErr_SetString(PyExc_IndexError, "list index out of range");
+        return -1;
+    }
+    if (nt_list_check_item((nt_List *)self, value) < 0) return -1;
+    return nt_list_store(self, index, value, 0);
+}
+
+static int nt_list_sq_contains(PyObject *self, PyObject *value) {
+    for (Py_ssize_t i = 0; i < ((nt_List *)self)->length; i++) {
+        PyObject *item = nt_list_item(self, i);
+        if (!item) return -1;
+        int equal = PyObject_RichCompareBool(item, value, Py_EQ);
+        Py_DECREF(item);
+        if (equal != 0) return equal;
+    }
+    return 0;
+}
+
+static PyObject *nt_list_py_append(PyObject *self, PyObject *value) {
+    if (nt_list_check_item((nt_List *)self, value) < 0 || nt_list_append(self, value) < 0) return NULL;
+    Py_RETURN_NONE;
+}
+
+static PyObject *nt_list_richcompare(PyObject *left, PyObject *right, int op) {
+    if ((op != Py_EQ && op != Py_NE) || !Py_IS_TYPE(right, &nt_ListType)) Py_RETURN_NOTIMPLEMENTED;
+    nt_List *a = (nt_List *)left, *b = (nt_List *)right;
+    int equal = a->length == b->length;
+    for (Py_ssize_t i = 0; equal && i < a->length; i++) {
+        PyObject *x = nt_list_item(left, i), *y = nt_list_item(right, i);
+        equal = x && y ? PyObject_RichCompareBool(x, y, Py_EQ) : -1;
+        Py_XDECREF(x);
+        Py_XDECREF(y);
+        if (equal < 0) return NULL;
+    }
+    return PyBool_FromLong(op == Py_EQ ? equal : !equal);
+}
+
+static PyObject *nt_list_repr(PyObject *self) {
+    return nt_show(self, 0);
+}
+
+static PySequenceMethods nt_list_sequence = {
+    .sq_length = nt_list_sq_length,
+    .sq_item = nt_list_sq_item,
+    .sq_ass_item = nt_list_sq_ass_item,
+    .sq_contains = nt_list_sq_contains,
+};
+
+static PyMethodDef nt_list_methods[] = {
+    {"append", nt_list_py_append, METH_O, NULL},
+    {NULL, NULL, 0, NULL},
+};
+
+static PyTypeObject nt_ListType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "nicethon.List",
+    .tp_basicsize = sizeof(nt_List),
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_SEQUENCE,
+    .tp_dealloc = nt_list_dealloc,
+    .tp_repr = nt_list_repr,
+    .tp_as_sequence = &nt_list_sequence,
+    .tp_richcompare = nt_list_richcompare,
+    .tp_iter = PySeqIter_New,
+    .tp_methods = nt_list_methods,
+};
