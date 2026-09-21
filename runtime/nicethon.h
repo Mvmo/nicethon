@@ -942,3 +942,234 @@ static int64_t nt_big_to_i64(PyObject *value) {
     if (overflow) return nt_panic_text("BigInt out of range for Int");
     return result;
 }
+
+// Intrinsics declared in the prelude:
+
+static int nt_print(PyObject *value) {
+    PyObject *text = nt_show(value, 0);
+    if (!text) return -1;
+    PyObject *out = PySys_GetObject("stdout");
+    int status = out ? PyFile_WriteObject(text, out, Py_PRINT_RAW) : -1;
+    Py_DECREF(text);
+    if (status == 0) status = PyFile_WriteString("\n", out);
+    return status;
+}
+
+static PyObject *nt_str(PyObject *value) {
+    return nt_show(value, 0);
+}
+
+static PyObject *nt_sum(PyObject *items) {
+    nt_List *list = (nt_List *)items;
+    if (list->kind == NT_I64) {
+        int64_t total = 0;
+        for (Py_ssize_t i = 0; i < list->length; i++)
+            if (__builtin_add_overflow(total, *NT_SLOT(items, i), &total)) return nt_overflow(), NULL;
+        return PyLong_FromLongLong(total);
+    }
+    if (list->kind == NT_F64) {
+        double total = 0;
+        for (Py_ssize_t i = 0; i < list->length; i++) total += *(double *)NT_SLOT(items, i);
+        return PyFloat_FromDouble(total);
+    }
+    PyObject *total = PyLong_FromLong(0);
+    for (Py_ssize_t i = 0; total && i < list->length; i++) Py_SETREF(total, PyNumber_Add(total, *(PyObject **)NT_SLOT(items, i)));
+    return total;
+}
+
+static int64_t nt_List_len(PyObject *self) {
+    return ((nt_List *)self)->length;
+}
+
+static int nt_List_push(PyObject *self, PyObject *item) {
+    return nt_list_append(self, item);
+}
+
+// Intrinsics returning an Option give the boxed value, or NULL without an error for None.
+
+static PyObject *nt_List_pop(PyObject *self) {
+    nt_List *list = (nt_List *)self;
+    if (list->length == 0) return NULL;
+    if (list->exports > 0) {
+        PyErr_SetString(PyExc_BufferError, "cannot resize a list while a buffer view on it exists");
+        return NULL;
+    }
+    PyObject *item = nt_list_item(self, list->length - 1);
+    if (!item) return NULL;
+    if (list->kind == NT_OBJ) Py_DECREF(*(PyObject **)NT_SLOT(self, list->length - 1));
+    list->length--;
+    return item;
+}
+
+static PyObject *nt_list_from_python_list(PyObject *items, int kind) {
+    PyObject *list = nt_list_new(kind, PyList_GET_SIZE(items));
+    for (Py_ssize_t i = 0; list && i < PyList_GET_SIZE(items); i++)
+        if (nt_list_append(list, PyList_GET_ITEM(items, i)) < 0) Py_CLEAR(list);
+    return list;
+}
+
+static PyObject *nt_sorted(PyObject *self, PyObject *key, int reverse) {
+    PyObject *builtins = PyEval_GetBuiltins();
+    PyObject *sorted = PyDict_GetItemString(builtins, "sorted");
+    PyObject *args = PyTuple_Pack(1, self);
+    PyObject *kwargs = PyDict_New();
+    PyObject *result = NULL;
+    if (args && kwargs && (!key || PyDict_SetItemString(kwargs, "key", key) == 0) && (!reverse || PyDict_SetItemString(kwargs, "reverse", Py_True) == 0)) {
+        PyObject *items = PyObject_Call(sorted, args, kwargs);
+        if (items) {
+            result = nt_list_from_python_list(items, ((nt_List *)self)->kind);
+            Py_DECREF(items);
+        }
+    }
+    Py_XDECREF(args);
+    Py_XDECREF(kwargs);
+    return result;
+}
+
+static PyObject *nt_List_sort_by(PyObject *self, PyObject *key) {
+    return nt_sorted(self, key, 0);
+}
+
+static PyObject *nt_List_sorted(PyObject *self) {
+    return nt_sorted(self, NULL, 0);
+}
+
+static PyObject *nt_List_reversed(PyObject *self) {
+    nt_List *list = (nt_List *)self;
+    PyObject *result = nt_list_new(list->kind, list->length);
+    for (Py_ssize_t i = list->length - 1; result && i >= 0; i--) {
+        PyObject *item = nt_list_item(self, i);
+        if (!item || nt_list_append(result, item) < 0) Py_CLEAR(result);
+        Py_XDECREF(item);
+    }
+    return result;
+}
+
+static PyObject *nt_List_join(PyObject *self, PyObject *separator) {
+    PyObject *parts = PyList_New(0);
+    for (Py_ssize_t i = 0; parts && i < ((nt_List *)self)->length; i++) {
+        PyObject *item = nt_list_item(self, i);
+        PyObject *text = item ? nt_show(item, 0) : NULL;
+        Py_XDECREF(item);
+        if (!text || PyList_Append(parts, text) < 0) Py_CLEAR(parts);
+        Py_XDECREF(text);
+    }
+    PyObject *result = parts ? PyUnicode_Join(separator, parts) : NULL;
+    Py_XDECREF(parts);
+    return result;
+}
+
+static int64_t nt_Str_len(PyObject *self) {
+    return PyUnicode_GetLength(self);
+}
+
+static PyObject *nt_Str_upper(PyObject *self) {
+    return PyObject_CallMethod(self, "upper", NULL);
+}
+
+static PyObject *nt_Str_lower(PyObject *self) {
+    return PyObject_CallMethod(self, "lower", NULL);
+}
+
+static PyObject *nt_Str_trim(PyObject *self) {
+    return PyObject_CallMethod(self, "strip", NULL);
+}
+
+static PyObject *nt_Str_replace(PyObject *self, PyObject *old, PyObject *new) {
+    return PyUnicode_Replace(self, old, new, -1);
+}
+
+static PyObject *nt_Str_split(PyObject *self, PyObject *separator) {
+    PyObject *parts = PyUnicode_Split(self, separator, -1);
+    if (!parts) return NULL;
+    PyObject *list = nt_list_from_python_list(parts, NT_OBJ);
+    if (list) ((nt_List *)list)->item_type = &PyUnicode_Type;
+    Py_DECREF(parts);
+    return list;
+}
+
+static int nt_Str_starts_with(PyObject *self, PyObject *prefix) {
+    return (int)PyUnicode_Tailmatch(self, prefix, 0, PY_SSIZE_T_MAX, -1);
+}
+
+static int nt_Str_ends_with(PyObject *self, PyObject *suffix) {
+    return (int)PyUnicode_Tailmatch(self, suffix, 0, PY_SSIZE_T_MAX, 1);
+}
+
+static PyObject *nt_parsed(PyObject *number, int int_range) {
+    if (!number) {
+        if (PyErr_ExceptionMatches(PyExc_ValueError)) PyErr_Clear();
+        return NULL;
+    }
+    int overflow = 0;
+    if (int_range) PyLong_AsLongLongAndOverflow(number, &overflow);
+    if (overflow) Py_CLEAR(number);
+    return number;
+}
+
+static PyObject *nt_Str_parse_int(PyObject *self) {
+    return nt_parsed(PyLong_FromUnicodeObject(self, 10), 1);
+}
+
+static PyObject *nt_Str_parse_float(PyObject *self) {
+    return nt_parsed(PyFloat_FromString(self), 0);
+}
+
+static double nt_Float_floor(double self) { return floor(self); }
+static double nt_Float_ceil(double self) { return ceil(self); }
+static double nt_Float_sqrt(double self) { return sqrt(self); }
+static double nt_Float_abs(double self) { return fabs(self); }
+static double nt_Float_round(double self) { return round(self); }
+
+static int64_t nt_Map_len(PyObject *self) {
+    return PyDict_GET_SIZE(self);
+}
+
+static PyObject *nt_Map_get(PyObject *self, PyObject *key) {
+    return Py_XNewRef(PyDict_GetItemWithError(self, key));
+}
+
+static PyObject *nt_Map_remove(PyObject *self, PyObject *key) {
+    PyObject *value = Py_XNewRef(PyDict_GetItemWithError(self, key));
+    if (value && PyDict_DelItem(self, key) < 0) Py_CLEAR(value);
+    return value;
+}
+
+static PyObject *nt_Map_keys(PyObject *self) {
+    PyObject *keys = PyDict_Keys(self);
+    PyObject *list = keys ? nt_list_from_python_list(keys, NT_OBJ) : NULL;
+    Py_XDECREF(keys);
+    return list;
+}
+
+static PyObject *nt_Map_values(PyObject *self) {
+    PyObject *values = PyDict_Values(self);
+    PyObject *list = values ? nt_list_from_python_list(values, NT_OBJ) : NULL;
+    Py_XDECREF(values);
+    return list;
+}
+
+static PyObject *nt_map_get(PyObject *map, PyObject *key) {
+    PyObject *value = PyDict_GetItemWithError(map, key);
+    if (!value) {
+        if (!PyErr_Occurred()) PyErr_SetObject(PyExc_KeyError, key);
+        return NULL;
+    }
+    return Py_NewRef(value);
+}
+
+// Module setup shared by all generated modules:
+
+static int nt_init_runtime(void) {
+    if (PyType_Ready(&nt_ListType) < 0 || PyType_Ready(&nt_CoroutineType) < 0 || PyType_Ready(&nt_ClosureType) < 0) return -1;
+    PyObject *shared = PyImport_AddModule("_nicethon");
+    if (!shared) return -1;
+    nt_panic_type = PyObject_GetAttrString(shared, "Panic");
+    if (!nt_panic_type) {
+        PyErr_Clear();
+        nt_panic_type = PyErr_NewException("nicethon.Panic", PyExc_BaseException, NULL);
+        if (!nt_panic_type || PyObject_SetAttrString(shared, "Panic", nt_panic_type) < 0) return -1;
+    }
+    nt_frame_globals = PyDict_New();
+    return nt_frame_globals ? 0 : -1;
+}
