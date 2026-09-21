@@ -845,3 +845,100 @@ static PyObject *nt_option_to_py(PyObject *option) {
     nt_RecordType *type = NT_RECORD(option);
     return type->field_count == 0 ? Py_NewRef(Py_None) : nt_field_get(option, &type->fields[0]);
 }
+
+// Function calls:
+
+static int nt_args(PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames, const char *const *names, int count, PyObject **slots) {
+    if (nargs > count) {
+        PyErr_Format(PyExc_TypeError, "takes %d arguments but %zd were given", count, nargs);
+        return -1;
+    }
+    for (Py_ssize_t i = 0; i < nargs; i++) slots[i] = args[i];
+    Py_ssize_t keywords = kwnames ? PyTuple_GET_SIZE(kwnames) : 0;
+    for (Py_ssize_t k = 0; k < keywords; k++) {
+        PyObject *name = PyTuple_GET_ITEM(kwnames, k);
+        int found = -1;
+        for (int i = 0; i < count; i++)
+            if (PyUnicode_CompareWithASCIIString(name, names[i]) == 0) found = i;
+        if (found < 0 || slots[found]) {
+            PyErr_Format(PyExc_TypeError, found < 0 ? "unexpected argument '%U'" : "argument '%U' given twice", name);
+            return -1;
+        }
+        slots[found] = args[nargs + k];
+    }
+    return 0;
+}
+
+// Exceptions:
+
+static int nt_throw(PyObject *value) {
+    if (nt_pyerr_type && Py_IS_TYPE(value, nt_pyerr_type)) value = (&((nt_Payload *)value)->value)[2];
+    if (PyExceptionInstance_Check(value)) PyErr_SetObject((PyObject *)Py_TYPE(value), value);
+    else if (PyExceptionClass_Check(value)) PyErr_SetNone(value);
+    else PyErr_SetString(PyExc_TypeError, "can only throw python exceptions");
+    return -1;
+}
+
+static int nt_matches(PyObject *exception, PyObject *filter) {
+    return PyErr_GivenExceptionMatches(exception, filter ? filter : PyExc_Exception);
+}
+
+static PyObject *nt_with_exit(PyObject *exit, PyObject *exception) {
+    if (!exception) return PyObject_CallFunctionObjArgs(exit, Py_None, Py_None, Py_None, NULL);
+    PyObject *traceback = PyException_GetTraceback(exception);
+    PyObject *result = PyObject_CallFunctionObjArgs(exit, (PyObject *)Py_TYPE(exception), exception, traceback ? traceback : Py_None, NULL);
+    Py_XDECREF(traceback);
+    return result;
+}
+
+// Integer and float arithmetic with Python semantics:
+
+static int nt_overflow(void) {
+    return nt_panic_text("integer overflow");
+}
+
+static int nt_floordiv_i64(int64_t left, int64_t right, int64_t *out) {
+    if (right == 0) return nt_panic_text("integer division by zero");
+    if (left == INT64_MIN && right == -1) return nt_overflow();
+    int64_t quotient = left / right;
+    if ((left % right != 0) && ((left < 0) != (right < 0))) quotient--;
+    *out = quotient;
+    return 0;
+}
+
+static int nt_mod_i64(int64_t left, int64_t right, int64_t *out) {
+    if (right == 0) return nt_panic_text("integer modulo by zero");
+    if (right == -1) {
+        *out = 0;
+        return 0;
+    }
+    int64_t rest = left % right;
+    if (rest != 0 && ((rest < 0) != (right < 0))) rest += right;
+    *out = rest;
+    return 0;
+}
+
+static int nt_pow_i64(int64_t base, int64_t exponent, int64_t *out) {
+    if (exponent < 0) return nt_panic_text("negative exponent for Int");
+    int64_t result = 1;
+    while (exponent > 0) {
+        if ((exponent & 1) && __builtin_mul_overflow(result, base, &result)) return nt_overflow();
+        exponent >>= 1;
+        if (exponent > 0 && __builtin_mul_overflow(base, base, &base)) return nt_overflow();
+    }
+    *out = result;
+    return 0;
+}
+
+static int nt_float_to_int(double value, int64_t *out) {
+    if (!(value > -9223372036854775809.0 && value < 9223372036854775808.0)) return nt_panic_text("Float out of range for Int");
+    *out = (int64_t)value;
+    return 0;
+}
+
+static int64_t nt_big_to_i64(PyObject *value) {
+    int overflow = 0;
+    long long result = PyLong_AsLongLongAndOverflow(value, &overflow);
+    if (overflow) return nt_panic_text("BigInt out of range for Int");
+    return result;
+}
