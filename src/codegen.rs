@@ -801,4 +801,496 @@ impl<'a> Gen<'a> {
             _ => self.emit(format!("{target} = {value};")),
         }
     }
+
+    // Statements:
+
+    fn stmt(&mut self, expr: &Expr) {
+        let mark = self.mark();
+        self.expr(expr);
+        self.release(mark);
+    }
+
+    fn block_stmt(&mut self, stmt: &Stmt) {
+        let mark = self.mark();
+        match stmt {
+            Stmt::Expr(expr) => {
+                self.expr(expr);
+            }
+            Stmt::Let(pattern, value) => {
+                let result = self.expr(value);
+                if !matches!(self.resolve(&value.ty), Ty::Never) {
+                    self.pattern(pattern, &result, &mut |_| {});
+                }
+            }
+        }
+        self.release(mark);
+    }
+
+    fn cond(&mut self, expr: &Expr) -> String {
+        let value = self.expr(expr);
+        let flag = self.temp(Repr::Bool);
+        self.emit(format!("{flag} = {value};"));
+        flag
+    }
+
+    // Expressions:
+
+    fn expr(&mut self, e: &Expr) -> String {
+        self.set_line(e.pos);
+        let ty = self.resolve(&e.ty);
+        let repr = self.repr_of(&ty);
+        match &e.kind {
+            ExprKind::Int(value) if ty == Ty::BigInt => self.call(Repr::Obj, format!("PyLong_FromLongLong(INT64_C({value}))")),
+            ExprKind::Int(value) => format!("INT64_C({value})"),
+            ExprKind::Float(value) => float_literal(*value),
+            ExprKind::Bool(value) => (*value as i32).to_string(),
+            ExprKind::Str(text) => self.string(text),
+            ExprKind::Bytes(bytes) => {
+                let literal: String = bytes.iter().map(|b| format!("\\{b:03o}")).collect();
+                self.call(Repr::Obj, format!("PyBytes_FromStringAndSize(\"{literal}\", {})", bytes.len()))
+            }
+            ExprKind::Unit => "0".into(),
+            ExprKind::Local(local) => self.read_local(*local),
+            ExprKind::Global(global) => match self.repr(&self.p.globals[*global].ty) {
+                Repr::Unit => "0".into(),
+                repr if repr.is_option() => self.unbox(&format!("G{global}"), repr),
+                _ => format!("G{global}"),
+            },
+            ExprKind::FnRef(def, targs) => {
+                let targs: Vec<Ty> = targs.iter().map(|t| self.resolve(t)).collect();
+                format!("V{}", self.instance(*def, &targs))
+            }
+            ExprKind::Lambda(lambda) => {
+                let instance = self.f.instance;
+                let captures = self.body().lambdas[*lambda].captures.clone();
+                let tuple = self.call(Repr::Obj, format!("PyTuple_New({})", captures.len()));
+                for (position, capture) in captures.iter().enumerate() {
+                    let item = if self.body().locals[*capture].cell {
+                        format!("v{capture}")
+                    } else {
+                        let ty = self.body().locals[*capture].ty.clone();
+                        let value = self.read_local(*capture);
+                        self.box_value(&value, &ty)
+                    };
+                    self.emit(format!("PyTuple_SET_ITEM({tuple}, {position}, Py_NewRef({item}));"));
+                }
+                self.call(Repr::Obj, format!("nt_closure_new(L{instance}_{lambda}, (void *)N{instance}_{lambda}, {tuple}, \"<lambda>\")"))
+            }
+            ExprKind::Call(def, targs, args) => self.call_function(*def, targs, args, &ty),
+            ExprKind::CallValue(function, args) => {
+                let Ty::Fn(params, ret) = self.resolve(&function.ty) else { unreachable!() };
+                let function = self.expr(function);
+                let values: Vec<String> = args.iter().zip(&params).map(|(arg, param)| {
+                    let value = self.expr(arg);
+                    self.coerce(&value, &arg.ty, param)
+                }).collect();
+                let ret_repr = self.repr(&ret);
+                let result = self.temp(ret_repr);
+                let pointer: String = params.iter().map(|p| format!(", {}", c_type(self.repr(p)))).collect();
+                let arguments: String = values.iter().map(|v| format!(", {v}")).collect();
+                // Nicethon closures are called directly, other callables through Python.
+                self.emit(format!("if (NT_NATIVE({function})) {{"));
+                self.emit(format!("{result} = (({} (*)(PyObject *{pointer}))NT_NATIVE({function}))(((nt_Closure *){function})->captures{arguments});", c_type(ret_repr)));
+                self.check_result(&result, ret_repr);
+                self.emit("} else {");
+                let boxed: Vec<String> = values.iter().zip(&params).map(|(value, param)| self.box_value(value, param)).collect();
+                let slow = self.vectorcall(&function, &boxed, None);
+                let converted = self.checked_value(&slow, &ret, "");
+                self.assign(&result, &converted, ret_repr);
+                self.emit("}");
+                self.coerce(&result, &ret, &ty)
+            }
+            ExprKind::PyCall(function, args) => {
+                let function = self.expr(function);
+                self.py_call(&function, args)
+            }
+            ExprKind::PyAttr(object, name) => {
+                let object = self.expr(object);
+                let name = self.string(name);
+                self.call(Repr::Obj, format!("PyObject_GetAttr({object}, {name})"))
+            }
+            ExprKind::PyIndex(object, parts) => {
+                let object = self.expr(object);
+                let key = self.index_key(parts);
+                self.call(Repr::Obj, format!("PyObject_GetItem({object}, {key})"))
+            }
+            ExprKind::TraitCall(method, targs, args) => {
+                let (def, targs) = self.trait_target(*method, targs);
+                self.call_function(def, &targs, args, &ty)
+            }
+            ExprKind::Super(global, this) => {
+                let this = self.read_local(*this);
+                self.call(Repr::Obj, format!("PyObject_CallFunctionObjArgs((PyObject *)&PySuper_Type, G{global}, {this}, NULL)"))
+            }
+            ExprKind::ToDyn(inner) => {
+                let value = self.expr(inner);
+                self.python_value(&value, &inner.ty)
+            }
+            ExprKind::FromDyn(inner, optional) => {
+                let value = self.expr(inner);
+                if !optional {
+                    return self.checked_value(&value, &ty, "");
+                }
+                let spec = self.spec(&self.owner_args(&ty)[0]);
+                let converted = self.temp(Repr::Obj);
+                self.emit(format!("{converted} = nt_try_convert({value}, {});", c_string(&spec)));
+                self.make_option(&converted, &ty)
+            }
+            ExprKind::Construct(def, args) if repr.is_option() => {
+                let payload = args.first().map(|arg| {
+                    let value = self.expr(arg);
+                    self.coerce(&value, &arg.ty, &self.owner_args(&ty)[0])
+                });
+                let _ = def;
+                self.option_value(&ty, payload.as_deref())
+            }
+            ExprKind::Construct(def, args) => {
+                let owner_args = self.owner_args(&ty);
+                let p = self.p;
+                let values: Vec<String> = args.iter().zip(p.fields(*def)).map(|(arg, field)| {
+                    let value = self.expr(arg);
+                    self.coerce(&value, &arg.ty, &field.ty.subst(&owner_args))
+                }).collect();
+                self.make_record(*def, &owner_args, &values)
+            }
+            ExprKind::Field(object, def, index) => {
+                let value = self.expr(object);
+                self.field(&value, *def, *index, &object.ty, &ty)
+            }
+            ExprKind::CopyWith(object, def, updates) => {
+                let args = self.owner_args(&object.ty);
+                let record = self.record(*def, &args);
+                let object = self.expr(object);
+                let p = self.p;
+                let values: Vec<(usize, String, Repr)> = updates.iter().map(|(index, value)| {
+                    let field_ty = p.fields(*def)[*index].ty.subst(&args);
+                    let result = self.expr(value);
+                    let converted = self.coerce(&result, &value.ty, &field_ty);
+                    (*index, self.stored(&converted, &field_ty), self.storage(&field_ty))
+                }).collect();
+                let copy = self.call(Repr::Obj, format!("nt_record_copy({object})"));
+                for (index, value, repr) in values {
+                    match repr {
+                        Repr::Obj => self.emit(format!("Py_SETREF(((S{record} *){copy})->f{index}, Py_NewRef({value}));")),
+                        Repr::Unit => {}
+                        _ => self.emit(format!("((S{record} *){copy})->f{index} = {value};")),
+                    }
+                }
+                copy
+            }
+            ExprKind::TupleGet(object, index) => {
+                let object = self.expr(object);
+                self.unbox(&format!("PyTuple_GET_ITEM({object}, {index})"), repr)
+            }
+            ExprKind::Tuple(items) => {
+                let values: Vec<String> = items.iter().map(|item| {
+                    let value = self.expr(item);
+                    self.box_value(&value, &item.ty)
+                }).collect();
+                let tuple = self.call(Repr::Obj, format!("PyTuple_New({})", values.len()));
+                for (index, value) in values.iter().enumerate() {
+                    self.emit(format!("PyTuple_SET_ITEM({tuple}, {index}, Py_NewRef({value}));"));
+                }
+                tuple
+            }
+            ExprKind::List(items) => {
+                let Ty::List(item_ty) = &ty else { unreachable!() };
+                let item_repr = self.repr(item_ty);
+                let values: Vec<String> = items.iter().map(|item| self.expr(item)).collect();
+                let list = self.call(Repr::Obj, format!("nt_list_new({}, {})", kind(item_repr), values.len()));
+                match self.resolve(item_ty) {
+                    Ty::Str => self.emit(format!("((nt_List *){list})->item_type = &PyUnicode_Type;")),
+                    Ty::Named(def, args) if matches!(self.p.defs[def].kind, DefKind::Struct { .. }) => {
+                        let record = self.record(def, &args);
+                        self.emit(format!("((nt_List *){list})->item_type = (PyTypeObject *)&T{record};"))
+                    }
+                    _ => {}
+                }
+                for value in values {
+                    let append = match item_repr {
+                        Repr::I64 => "nt_list_append_i64",
+                        Repr::F64 => "nt_list_append_f64",
+                        Repr::Bool => "nt_list_append_bool",
+                        _ => "nt_list_append",
+                    };
+                    let value = if item_repr == Repr::Unit { "Py_None".to_string() } else { self.stored(&value, item_ty) };
+                    self.check(&format!("{append}({list}, {value}) < 0"));
+                }
+                list
+            }
+            ExprKind::Map(entries) => {
+                let map = self.call(Repr::Obj, "PyDict_New()".into());
+                for (key, value) in entries {
+                    let k = self.expr(key);
+                    let k = self.box_value(&k, &key.ty);
+                    let v = self.expr(value);
+                    let v = self.box_value(&v, &value.ty);
+                    self.check(&format!("PyDict_SetItem({map}, {k}, {v}) < 0"));
+                }
+                map
+            }
+            ExprKind::Range(start, end, inclusive) => {
+                let start = self.expr(start);
+                let end = self.expr(end);
+                self.call(Repr::Obj, format!("nt_range({start}, {end}{})", if *inclusive { " + 1" } else { "" }))
+            }
+            ExprKind::Binary(op, left, right) => self.binary(*op, left, right, &ty),
+            ExprKind::Inplace(op, target, value) => {
+                let target = self.expr(target);
+                let value = self.expr(value);
+                let function = py_number(*op).replace("PyNumber_", "PyNumber_InPlace");
+                let extra = if *op == BinOp::Pow { ", Py_None" } else { "" };
+                self.call(Repr::Obj, format!("{function}({target}, {value}{extra})"))
+            }
+            ExprKind::Unary(op, inner) => {
+                let inner_ty = self.resolve(&inner.ty);
+                let value = self.expr(inner);
+                match (op, inner_ty.repr()) {
+                    (UnOp::Neg, Repr::I64) => {
+                        self.emit(format!("if ({value} == INT64_MIN) {{ nt_overflow(); {} }}", self.fail()));
+                        format!("(-{value})")
+                    }
+                    (UnOp::Neg, Repr::F64) => format!("(-{value})"),
+                    (UnOp::Neg, _) => self.call(Repr::Obj, format!("PyNumber_Negative({value})")),
+                    (UnOp::Not, Repr::Bool) => format!("(!{value})"),
+                    (UnOp::Not, _) => {
+                        let flag = self.call(Repr::Bool, format!("PyObject_Not({value})"));
+                        format!("({flag} ? Py_True : Py_False)")
+                    }
+                    (UnOp::BitNot, Repr::I64) => format!("(~{value})"),
+                    (UnOp::BitNot, _) => self.call(Repr::Obj, format!("PyNumber_Invert({value})")),
+                }
+            }
+            ExprKind::Cast(inner) => {
+                let from = self.resolve(&inner.ty);
+                let value = self.expr(inner);
+                match (from, &ty) {
+                    (Ty::Int, Ty::Float) => format!("((double){value})"),
+                    (Ty::Float, Ty::Int) => {
+                        let result = self.temp(Repr::I64);
+                        self.check(&format!("nt_float_to_int({value}, &{result}) < 0"));
+                        result
+                    }
+                    (Ty::Int, Ty::BigInt) => self.call(Repr::Obj, format!("PyLong_FromLongLong({value})")),
+                    (Ty::BigInt, Ty::Int) => self.call(Repr::I64, format!("nt_big_to_i64({value})")),
+                    (Ty::BigInt, Ty::Float) => self.call(Repr::F64, format!("PyLong_AsDouble({value})")),
+                    _ => value,
+                }
+            }
+            ExprKind::Index(object, index) => {
+                let object_ty = self.resolve(&object.ty);
+                let object = self.expr(object);
+                let index_value = self.expr(index);
+                match object_ty {
+                    Ty::Map(..) => {
+                        let key = self.box_value(&index_value, &index.ty);
+                        let value = self.call(Repr::Obj, format!("nt_map_get({object}, {key})"));
+                        self.unbox(&value, repr)
+                    }
+                    _ => self.list_get(&object, &index_value, &ty),
+                }
+            }
+            ExprKind::Template(parts) => {
+                let values: Vec<String> = parts.iter().map(|part| {
+                    let value = self.expr(part);
+                    self.box_value(&value, &part.ty)
+                }).collect();
+                let argv = self.argv(&values);
+                self.call(Repr::Obj, format!("nt_template({}, {argv})", values.len()))
+            }
+            ExprKind::Block(stmts, tail) => {
+                for stmt in stmts {
+                    self.block_stmt(stmt);
+                }
+                match tail {
+                    Some(tail) => {
+                        let value = self.expr(tail);
+                        self.coerce(&value, &tail.ty, &ty)
+                    }
+                    None => zero(repr).into(),
+                }
+            }
+            ExprKind::If(cond, then, otherwise) => {
+                let flag = self.cond(cond);
+                let result = (repr != Repr::Unit && otherwise.is_some()).then(|| self.temp(repr));
+                self.emit(format!("if ({flag}) {{"));
+                self.branch(then, result.as_deref(), &ty);
+                if let Some(otherwise) = otherwise {
+                    self.emit("} else {");
+                    self.branch(otherwise, result.as_deref(), &ty);
+                }
+                self.emit("}");
+                result.unwrap_or_else(|| zero(repr).into())
+            }
+            ExprKind::Match(scrutinee, arms) => {
+                let value = self.expr(scrutinee);
+                let result = (repr != Repr::Unit).then(|| self.temp(repr));
+                let end = self.label("match_end");
+                for arm in arms {
+                    self.emit("{");
+                    let mut on_match = |gen: &mut Self| {
+                        let guard = arm.guard.as_ref().map(|guard| gen.cond(guard));
+                        if let Some(guard) = &guard {
+                            gen.emit(format!("if ({guard}) {{"));
+                        }
+                        gen.branch(&arm.body, result.as_deref(), &ty);
+                        gen.emit(format!("goto {end};"));
+                        if guard.is_some() {
+                            gen.emit("}");
+                        }
+                    };
+                    self.pattern(&arm.pattern, &value, &mut on_match);
+                    self.emit("}");
+                }
+                let fail = self.fail();
+                self.emit(format!("nt_panic_text(\"no match arm matched\"); {fail}"));
+                self.emit(format!("{end}:;"));
+                result.unwrap_or_else(|| zero(repr).into())
+            }
+            ExprKind::While(cond, body) => {
+                let (brk, cont) = (self.label("break"), self.label("continue"));
+                self.emit("for (;;) {");
+                let mark = self.mark();
+                let flag = self.cond(cond);
+                self.release(mark);
+                self.emit(format!("if (!{flag}) goto {brk};"));
+                self.enter_loop(&brk, &cont, None);
+                self.loop_body(body);
+                self.f.loops.pop();
+                self.emit("}");
+                self.emit(format!("{brk}:;"));
+                "0".into()
+            }
+            ExprKind::Loop(body) => {
+                let (brk, cont) = (self.label("break"), self.label("continue"));
+                let result = (repr != Repr::Unit).then(|| self.temp(repr));
+                self.emit("for (;;) {");
+                self.enter_loop(&brk, &cont, result.clone().map(|r| (r, ty.clone())));
+                self.loop_body(body);
+                self.f.loops.pop();
+                self.emit("}");
+                self.emit(format!("{brk}:;"));
+                result.unwrap_or_else(|| "0".into())
+            }
+            ExprKind::For(pattern, iterable, body) => {
+                self.for_loop(pattern, iterable, body);
+                "0".into()
+            }
+            ExprKind::Break(value) => {
+                let target = self.f.loops.last().map(|l| (l.brk.clone(), l.result.clone(), l.mark, l.cleanups)).unwrap();
+                if let (Some(value), Some((result, result_ty))) = (value, &target.1) {
+                    let computed = self.expr(value);
+                    let computed = self.coerce(&computed, &value.ty, result_ty);
+                    let result_repr = self.repr(result_ty);
+                    self.assign(result, &computed, result_repr);
+                }
+                self.release_copy(target.2);
+                self.run_cleanups(target.3);
+                self.emit(format!("goto {};", target.0));
+                "0".into()
+            }
+            ExprKind::Continue => {
+                let target = self.f.loops.last().map(|l| (l.cont.clone(), l.mark, l.cleanups)).unwrap();
+                self.release_copy(target.1);
+                self.run_cleanups(target.2);
+                self.emit(format!("goto {};", target.0));
+                "0".into()
+            }
+            ExprKind::Return(value) => {
+                let value = value.as_ref().map(|value| (self.expr(value), value.ty.clone()));
+                self.emit_return(value);
+                zero(repr).into()
+            }
+            ExprKind::Throw(value) => {
+                let value = self.expr(value);
+                let fail = self.fail();
+                self.emit(format!("nt_throw({value}); {fail}"));
+                zero(repr).into()
+            }
+            ExprKind::Try(body, catches, finally) => {
+                self.try_stmt(body, catches, finally.as_deref());
+                "0".into()
+            }
+            ExprKind::TryExpr(inner) => self.try_expr(inner, &ty),
+            ExprKind::Question(inner) => {
+                let inner_ty = self.resolve(&inner.ty);
+                let value = self.expr(inner);
+                let args = self.owner_args(&inner_ty);
+                let (good, bad) = if matches!(inner_ty, Ty::Named(def, _) if def == self.result_type) { (self.ok, self.err) } else { (self.some, self.none) };
+                let inner_repr = self.repr(&inner_ty);
+                let failed = match inner_repr {
+                    Repr::OptObj => format!("!{value}"),
+                    repr if repr.is_option() => format!("!{value}.tag"),
+                    _ => format!("Py_IS_TYPE({value}, (PyTypeObject *)&T{})", self.record(bad, &args)),
+                };
+                self.emit(format!("if ({failed}) {{"));
+                let ret_ty = match &self.f.ret {
+                    Ret::Native(ty) | Ret::Boxed(ty) => self.resolve(ty),
+                    Ret::Status => Ty::Dyn,
+                };
+                let replacement = if bad == self.err {
+                    let payload = self.field(&value, bad, 0, &inner_ty, &args[1]);
+                    self.make_record(bad, &self.owner_args(&ret_ty), &[payload])
+                } else {
+                    self.option_value(&ret_ty, None)
+                };
+                self.emit_return(Some((replacement, ret_ty)));
+                self.emit("}");
+                match inner_repr {
+                    Repr::OptObj => value,
+                    repr if repr.is_option() => format!("{value}.value"),
+                    _ => self.field(&value, good, 0, &inner_ty, &ty),
+                }
+            }
+            ExprKind::With(manager, local, body) => {
+                self.with_stmt(manager, *local, body);
+                "0".into()
+            }
+            ExprKind::Await(inner) => {
+                let value = self.expr(inner);
+                let result = self.await_value(&value);
+                self.checked_value(&result, &ty, "")
+            }
+            ExprKind::SetLocal(local, value) => {
+                let result = self.expr(value);
+                self.write_local(*local, &result, &value.ty, false);
+                "0".into()
+            }
+            ExprKind::SetIndex(object, index, value) => {
+                let object_ty = self.resolve(&object.ty);
+                let object = self.expr(object);
+                let index_value = self.expr(index);
+                let result = self.expr(value);
+                if let Ty::Map(..) = object_ty {
+                    let key = self.box_value(&index_value, &index.ty);
+                    let boxed = self.box_value(&result, &value.ty);
+                    self.check(&format!("PyDict_SetItem({object}, {key}, {boxed}) < 0"));
+                } else {
+                    let setter = match self.storage(&value.ty) {
+                        Repr::I64 => "nt_list_set_i64",
+                        Repr::F64 => "nt_list_set_f64",
+                        Repr::Bool => "nt_list_set_bool",
+                        _ => "nt_list_set",
+                    };
+                    let result = self.stored(&result, &value.ty);
+                    self.check(&format!("{setter}({object}, {index_value}, {result}) < 0"));
+                }
+                "0".into()
+            }
+            ExprKind::SetPyIndex(object, parts, value) => {
+                let object = self.expr(object);
+                let key = self.index_key(parts);
+                let result = self.expr(value);
+                self.check(&format!("PyObject_SetItem({object}, {key}, {result}) < 0"));
+                "0".into()
+            }
+            ExprKind::SetAttr(object, name, value) => {
+                let object = self.expr(object);
+                let result = self.expr(value);
+                let name = self.string(name);
+                self.check(&format!("PyObject_SetAttr({object}, {name}, {result}) < 0"));
+                "0".into()
+            }
+        }
+    }
 }
