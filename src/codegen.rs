@@ -504,4 +504,301 @@ impl<'a> Gen<'a> {
             _ => self.emit(format!("v{local} = {value};")),
         }
     }
+
+    // Functions:
+
+    fn function(&mut self, header: String, trace: &str, func: Func, setup: impl FnOnce(&mut Self), value: Option<&Expr>) {
+        let saved = std::mem::take(&mut self.f);
+        self.f = Func { error: "error".into(), ..func };
+        let (ret, module) = (self.f.ret.clone(), self.f.module);
+        if let Some(index) = self.f.body {
+            for (local, info) in self.p.fns[index].locals.iter().enumerate() {
+                if info.owner == self.f.owner {
+                    self.declare_local(local);
+                }
+            }
+        }
+        setup(self);
+        if let Some(value) = value {
+            let result = self.expr(value);
+            let ty = value.ty.clone();
+            if !matches!(self.resolve(&ty), Ty::Never) {
+                self.emit_return(Some((result, ty)));
+            }
+        }
+        let ret_repr = match &ret {
+            Ret::Status => Repr::Unit,
+            Ret::Native(ty) => self.repr(ty),
+            Ret::Boxed(_) => Repr::Obj,
+        };
+        let mut text = format!("{header} {{\n    int nt_lineno = 0;\n    {} ret = {};\n", c_type(ret_repr), zero(ret_repr));
+        let mut cleanup = String::new();
+        for (name, repr) in &self.f.vars {
+            writeln!(text, "    {} {name} = {};", c_type(*repr), zero(*repr)).unwrap();
+            if repr.owned() {
+                writeln!(cleanup, "    Py_XDECREF({name});").unwrap();
+            }
+        }
+        text.push_str(&self.f.out);
+        let file = &self.names[module];
+        write!(text, "done:\n{cleanup}    return ret;\nerror:\n    nt_traceback({}, {}, nt_lineno);\n{cleanup}", c_string(trace), c_string(file)).unwrap();
+        if ret_repr.owned() {
+            text.push_str("    Py_XDECREF(ret);\n");
+        }
+        writeln!(text, "    return {};\n}}\n", error_value(ret_repr)).unwrap();
+        self.code.push_str(&text);
+        self.f = saved;
+    }
+
+    fn emit_return(&mut self, value: Option<(String, Ty)>) {
+        match (self.f.ret.clone(), value) {
+            (Ret::Native(declared), Some((value, ty))) => {
+                let value = self.coerce(&value, &ty, &declared);
+                match self.repr(&declared) {
+                    Repr::Unit => {}
+                    Repr::Obj => self.emit(format!("ret = {value}; Py_INCREF(ret);")),
+                    Repr::OptObj => self.emit(format!("ret = {value}; Py_XINCREF(ret);")),
+                    _ => self.emit(format!("ret = {value};")),
+                }
+            }
+            (Ret::Boxed(_), value) => {
+                let boxed = match value {
+                    Some((value, ty)) => self.box_value(&value, &ty),
+                    None => "Py_None".into(),
+                };
+                self.emit(format!("ret = {boxed}; Py_INCREF(ret);"));
+            }
+            _ => {}
+        }
+        self.run_cleanups(0);
+        self.emit("goto done;");
+    }
+
+    fn run_cleanups(&mut self, depth: usize) {
+        let cleanups: Vec<usize> = (depth..self.f.cleanups.len()).rev().collect();
+        for index in cleanups {
+            let saved = self.f.cleanups.split_off(index);
+            match &saved[0] {
+                Cleanup::Finally(block) => {
+                    let block = block.clone();
+                    self.stmt(&block);
+                }
+                Cleanup::WithExit(exit) => {
+                    let exit = exit.clone();
+                    self.call(Repr::Obj, format!("nt_with_exit({exit}, NULL)"));
+                }
+            }
+            self.f.cleanups.extend(saved);
+        }
+    }
+
+    fn symbol(&self, instance: usize) -> String {
+        format!("F{instance}_{}", ident(&self.p.defs[self.instances[instance].0].name))
+    }
+
+    fn intrinsic_symbol(&self, def: DefId) -> String {
+        let sig = self.p.sig(def);
+        let owner = match sig.params.first().map(|p| (p.kind, self.erased(&p.ty))) {
+            Some((ParamKind::SelfParam, Ty::List(_))) => "List_",
+            Some((ParamKind::SelfParam, Ty::Str)) => "Str_",
+            Some((ParamKind::SelfParam, Ty::Float)) => "Float_",
+            Some((ParamKind::SelfParam, Ty::Int)) => "Int_",
+            Some((ParamKind::SelfParam, Ty::Map(..))) => "Map_",
+            _ => "",
+        };
+        format!("nt_{owner}{}", self.p.defs[def].name)
+    }
+
+    fn native_header(&self, instance: usize) -> String {
+        let (def, targs) = &self.instances[instance];
+        let sig = self.p.sig(*def);
+        let concrete = |ty: &Ty| self.repr_of(&self.p.resolve(ty).subst(targs));
+        let ret = if sig.is_async { Repr::Obj } else { concrete(&sig.ret) };
+        let params: Vec<String> = sig.params.iter().enumerate().map(|(i, p)| format!("{} a{i}", c_type(concrete(&p.ty)))).collect();
+        let params = if params.is_empty() { "void".into() } else { params.join(", ") };
+        format!("static {} {}({params})", c_type(ret), self.symbol(instance))
+    }
+
+    fn native(&mut self, instance: usize) {
+        let (def, targs) = self.instances[instance].clone();
+        let index = self.bodies[&def];
+        let p = self.p;
+        let body = &p.fns[index];
+        let sig = p.sig(def);
+        let module = p.defs[def].module;
+        let header = self.native_header(instance);
+        let params: Vec<(usize, Ty)> = body.params.iter().zip(&sig.params).map(|(local, p)| (*local, p.ty.clone())).collect();
+        let bind_params = |gen: &mut Self| {
+            for (i, (local, ty)) in params.iter().enumerate() {
+                gen.write_local(*local, &format!("a{i}"), ty, true);
+            }
+        };
+        let func = Func { ret: Ret::Native(sig.ret.clone()), body: Some(index), module, targs, instance, ..Default::default() };
+        if sig.is_async {
+            self.coroutine(func, header, bind_params);
+        } else {
+            self.function(header, &p.defs[def].name, func, bind_params, Some(&body.body));
+        }
+        for lambda in 0..body.lambdas.len() {
+            self.lambda(instance, lambda);
+        }
+        self.wrapper(instance);
+    }
+
+    // Every lambda becomes a native function N (captures, unboxed arguments)
+    // and an entry L that Python calls with boxed arguments.
+    fn lambda(&mut self, instance: usize, lambda: usize) {
+        let (def, targs) = self.instances[instance].clone();
+        let index = self.bodies[&def];
+        let p = self.p;
+        let info = &p.fns[index].lambdas[lambda];
+        let module = p.defs[def].module;
+        let (params, ret) = self.lambda_types(instance, lambda);
+        let native = format!("N{instance}_{lambda}");
+        let setup = |gen: &mut Self| {
+            for &capture in &info.captures {
+                gen.declare_local(capture);
+            }
+            for (position, &capture) in info.captures.iter().enumerate() {
+                let item = format!("PyTuple_GET_ITEM(self, {position})");
+                if gen.body().locals[capture].cell {
+                    gen.emit(format!("v{capture} = Py_NewRef({item});"));
+                } else {
+                    let ty = gen.body().locals[capture].ty.clone();
+                    let repr = gen.repr(&ty);
+                    let value = gen.unbox(&item, repr);
+                    gen.write_local(capture, &value, &ty, true);
+                }
+            }
+            for (position, &param) in info.params.iter().enumerate() {
+                let ty = gen.body().locals[param].ty.clone();
+                gen.write_local(param, &format!("a{position}"), &ty, true);
+            }
+        };
+        let func = Func { ret: Ret::Native(info.ret.clone()), body: Some(index), owner: lambda + 1, module, targs: targs.clone(), instance, ..Default::default() };
+        self.function(self.native_signature(&native, &params, &ret), "<lambda>", func, setup, Some(&info.body));
+        let names: Vec<String> = info.params.iter().map(|&param| p.fns[index].locals[param].name.clone()).collect();
+        let header = format!("static PyObject *L{instance}_{lambda}(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)");
+        let entry = |gen: &mut Self| {
+            let count = params.len();
+            let fail = gen.fail();
+            gen.emit(format!("if (nargs != {count} || kwnames) {{ PyErr_SetString(PyExc_TypeError, \"lambda takes {count} positional arguments\"); {fail} }}"));
+            let values: Vec<String> = params.iter().zip(&names).enumerate().map(|(i, (ty, name))| gen.checked_value(&format!("args[{i}]"), ty, name)).collect();
+            let arguments: String = values.iter().map(|v| format!(", {v}")).collect();
+            let result = gen.call(gen.repr_of(&ret), format!("{native}(self{arguments})"));
+            let boxed = gen.box_value(&result, &ret);
+            gen.emit(format!("ret = {boxed}; Py_INCREF(ret);"));
+        };
+        self.function(header, "<lambda>", Func { ret: Ret::Boxed(Ty::Dyn), module, targs, instance, ..Default::default() }, entry, None);
+    }
+
+    fn wrapper(&mut self, instance: usize) {
+        let (def, targs) = self.instances[instance].clone();
+        let p = self.p;
+        let sig = p.sig(def);
+        let name = p.defs[def].name.clone();
+        let count = sig.params.len();
+        let names: Vec<String> = sig.params.iter().map(|p| c_string(&p.name)).collect();
+        let header = format!("static PyObject *W{instance}(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)");
+        let module = p.defs[def].module;
+        let ret_ty = if sig.is_async { Ty::Dyn } else { sig.ret.clone() };
+        let setup = |gen: &mut Self| {
+            gen.emit(format!("static const char *const names[] = {{{}NULL}};", names.iter().map(|n| format!("{n}, ")).collect::<String>()));
+            gen.emit(format!("PyObject *slots[{}] = {{0}};", count + 1));
+            let fail = gen.fail();
+            gen.emit(format!("if (nt_args(args, nargs, kwnames, names, {count}, slots) < 0) {fail}"));
+            let mut values = vec![];
+            for (i, param) in sig.params.iter().enumerate() {
+                let repr = gen.repr(&param.ty);
+                let slot = gen.temp(repr);
+                match &param.default {
+                    Some(default) => {
+                        gen.emit(format!("if (!slots[{i}]) {{"));
+                        let value = gen.expr(default);
+                        let value = gen.coerce(&value, &default.ty, &param.ty);
+                        gen.assign(&slot, &value, repr);
+                        gen.emit("} else {");
+                    }
+                    None => {
+                        let missing = format!("missing argument '{}'", param.name);
+                        gen.emit(format!("if (!slots[{i}]) {{ PyErr_SetString(PyExc_TypeError, {}); {fail} }}", c_string(&missing)));
+                        gen.emit("{");
+                    }
+                }
+                let value = gen.checked_value(&format!("slots[{i}]"), &param.ty, &param.name);
+                gen.assign(&slot, &value, repr);
+                gen.emit("}");
+                values.push(slot);
+            }
+            let ret_repr = if sig.is_async { Repr::Obj } else { gen.repr(&ret_ty) };
+            let result = gen.call(ret_repr, format!("{}({})", gen.symbol(instance), values.join(", ")));
+            let boxed = gen.python_value(&result, &ret_ty);
+            gen.emit(format!("ret = {boxed}; Py_INCREF(ret);"));
+        };
+        self.function(header, &name, Func { ret: Ret::Boxed(Ty::Dyn), module, targs, ..Default::default() }, setup, None);
+        let arguments: Vec<String> = (0..count).map(|i| format!("a{i}")).collect();
+        writeln!(self.code, "{} {{\n    return {}({});\n}}\n", self.adapter_header(instance), self.symbol(instance), arguments.join(", ")).unwrap();
+    }
+
+    // NF adapts a named function to the closure calling convention.
+    fn adapter_header(&self, instance: usize) -> String {
+        let (def, targs) = &self.instances[instance];
+        let sig = self.p.sig(*def);
+        let concrete = |ty: &Ty| self.p.resolve(ty).subst(targs);
+        let params: Vec<Ty> = sig.params.iter().map(|p| concrete(&p.ty)).collect();
+        let ret = if sig.is_async { Ty::Dyn } else { concrete(&sig.ret) };
+        self.native_signature(&format!("NF{instance}"), &params, &ret)
+    }
+
+    fn call_function(&mut self, def: DefId, targs: &[Ty], args: &[Expr], ty: &Ty) -> String {
+        let p = self.p;
+        let sig = p.sig(def);
+        let raw: Vec<String> = args.iter().map(|arg| self.expr(arg)).collect();
+        if sig.kind == FnKind::Intrinsic {
+            return self.call_intrinsic(def, args, &raw, ty);
+        }
+        let targs: Vec<Ty> = targs.iter().map(|t| self.resolve(t)).collect();
+        let instance = self.instance(def, &targs);
+        let values: Vec<String> = raw.iter().zip(args).zip(&sig.params).map(|((value, arg), param)| self.coerce(value, &arg.ty, &param.ty.subst(&targs))).collect();
+        let call = format!("{}({})", self.symbol(instance), values.join(", "));
+        if sig.is_async {
+            return self.call(Repr::Obj, call);
+        }
+        let ret = self.p.resolve(&sig.ret).subst(&targs);
+        let result = self.call(self.repr_of(&ret), call);
+        self.coerce(&result, &ret, ty)
+    }
+
+    fn call_intrinsic(&mut self, def: DefId, args: &[Expr], raw: &[String], ty: &Ty) -> String {
+        let sig = self.p.sig(def);
+        let symbol = self.intrinsic_symbol(def);
+        let params: Vec<Ty> = sig.params.iter().map(|p| self.erased(&p.ty)).collect();
+        // Pushing an unboxed Int or Float skips the boxed path.
+        let call = match (symbol.as_str(), args.get(1).map(|arg| self.repr(&arg.ty))) {
+            ("nt_List_push", Some(Repr::I64)) => format!("nt_list_append_i64({}, {})", raw[0], raw[1]),
+            ("nt_List_push", Some(Repr::F64)) => format!("nt_list_append_f64({}, {})", raw[0], raw[1]),
+            _ => {
+                let values: Vec<String> = raw.iter().zip(args).zip(&params).map(|((value, arg), param)| self.coerce(value, &arg.ty, param)).collect();
+                format!("{symbol}({})", values.join(", "))
+            }
+        };
+        if self.is_option(&sig.ret) {
+            let payload = self.temp(Repr::Obj);
+            self.emit(format!("{payload} = {call};"));
+            self.check(&format!("!{payload} && PyErr_Occurred()"));
+            return self.make_option(&payload, ty);
+        }
+        let declared = self.erased(&sig.ret);
+        let result = self.call(self.repr_of(&declared), call);
+        self.coerce(&result, &declared, ty)
+    }
+
+    fn assign(&mut self, target: &str, value: &str, repr: Repr) {
+        match repr {
+            Repr::Obj => self.emit(format!("{target} = Py_NewRef({value});")),
+            Repr::OptObj => self.emit(format!("{target} = Py_XNewRef({value});")),
+            Repr::Unit => {}
+            _ => self.emit(format!("{target} = {value};")),
+        }
+    }
 }
