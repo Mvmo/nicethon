@@ -1293,4 +1293,224 @@ impl<'a> Gen<'a> {
             }
         }
     }
+
+    fn branch(&mut self, value: &Expr, result: Option<&str>, ty: &Ty) {
+        let computed = self.expr(value);
+        if let Some(result) = result {
+            if !matches!(self.resolve(&value.ty), Ty::Never) {
+                let converted = self.coerce(&computed, &value.ty, ty);
+                let repr = self.repr(ty);
+                self.assign(result, &converted, repr);
+            }
+        }
+    }
+
+    fn list_get(&mut self, list: &str, index: &str, item_ty: &Ty) -> String {
+        let (repr, storage) = (self.repr(item_ty), self.storage(item_ty));
+        let getter = match storage {
+            Repr::I64 => "nt_list_get_i64",
+            Repr::F64 => "nt_list_get_f64",
+            Repr::Bool => "nt_list_get_bool",
+            _ => "nt_list_get_obj",
+        };
+        let result = self.call(if storage == Repr::Unit { Repr::Obj } else { storage }, format!("{getter}({list}, {index})"));
+        match repr {
+            Repr::Unit => "0".into(),
+            repr if repr.is_option() => self.unbox(&result, repr),
+            _ => result,
+        }
+    }
+
+    fn field(&mut self, object: &str, def: DefId, index: usize, owner: &Ty, ty: &Ty) -> String {
+        let args = self.owner_args(owner);
+        let declared = self.p.fields(def)[index].ty.subst(&args);
+        let repr = self.repr(&declared);
+        if repr == Repr::Unit {
+            return "0".into();
+        }
+        let record = self.record(def, &args);
+        let stored = format!("((S{record} *){object})->f{index}");
+        let value = if repr.is_option() { self.unbox(&stored, repr) } else { stored };
+        self.coerce(&value, &declared, ty)
+    }
+
+    fn argv(&mut self, values: &[String]) -> String {
+        if values.is_empty() {
+            return "NULL".into();
+        }
+        self.f.temps += 1;
+        let name = format!("argv{}", self.f.temps);
+        self.emit(format!("PyObject *{name}[] = {{{}}};", values.join(", ")));
+        name
+    }
+
+    fn vectorcall(&mut self, function: &str, values: &[String], kwnames: Option<String>) -> String {
+        let argv = self.argv(values);
+        let positional = values.len() - kwnames.as_ref().map_or(0, |k| self.kwnames[k[2..].parse::<usize>().unwrap()].len());
+        let kwnames = kwnames.unwrap_or_else(|| "NULL".into());
+        self.call(Repr::Obj, format!("PyObject_Vectorcall({function}, {argv}, {positional}, {kwnames})"))
+    }
+
+    fn py_call(&mut self, function: &str, args: &[PyArg]) -> String {
+        let spread = args.iter().any(|a| matches!(a, PyArg::Star(_) | PyArg::StarStar(_)));
+        if spread {
+            let list = self.call(Repr::Obj, "PyList_New(0)".into());
+            let dict = self.call(Repr::Obj, "PyDict_New()".into());
+            for arg in args {
+                match arg {
+                    PyArg::Pos(value) => {
+                        let value = self.expr(value);
+                        self.check(&format!("PyList_Append({list}, {value}) < 0"));
+                    }
+                    PyArg::Star(value) => {
+                        let value = self.expr(value);
+                        self.call(Repr::Obj, format!("PySequence_InPlaceConcat({list}, {value})"));
+                    }
+                    PyArg::Named(name, value) => {
+                        let value = self.expr(value);
+                        let name = self.string(name);
+                        self.check(&format!("PyDict_SetItem({dict}, {name}, {value}) < 0"));
+                    }
+                    PyArg::StarStar(value) => {
+                        let value = self.expr(value);
+                        self.check(&format!("PyDict_Update({dict}, {value}) < 0"));
+                    }
+                }
+            }
+            return self.call(Repr::Obj, format!("nt_call_spread({function}, {list}, {dict})"));
+        }
+        let mut positional = vec![];
+        let mut named = vec![];
+        let mut names = vec![];
+        for arg in args {
+            match arg {
+                PyArg::Pos(value) => positional.push(self.expr(value)),
+                PyArg::Named(name, value) => {
+                    named.push(self.expr(value));
+                    names.push(name.clone());
+                }
+                _ => unreachable!(),
+            }
+        }
+        let kwnames = (!names.is_empty()).then(|| {
+            self.kwnames.push(names);
+            format!("KW{}", self.kwnames.len() - 1)
+        });
+        positional.extend(named);
+        self.vectorcall(function, &positional, kwnames)
+    }
+
+    fn index_key(&mut self, parts: &[PyIndexPart]) -> String {
+        let values: Vec<String> = parts
+            .iter()
+            .map(|part| match part {
+                PyIndexPart::Expr(value) => self.expr(value),
+                PyIndexPart::Ellipsis => "Py_Ellipsis".into(),
+                PyIndexPart::Slice(start, stop, step) => {
+                    let bound = |gen: &mut Self, value: &Option<Box<Expr>>| value.as_ref().map_or("Py_None".to_string(), |v| gen.expr(v));
+                    let (start, stop, step) = (bound(self, start), bound(self, stop), bound(self, step));
+                    self.call(Repr::Obj, format!("PySlice_New({start}, {stop}, {step})"))
+                }
+            })
+            .collect();
+        if values.len() == 1 {
+            return values[0].clone();
+        }
+        let tuple = self.call(Repr::Obj, format!("PyTuple_New({})", values.len()));
+        for (index, value) in values.iter().enumerate() {
+            self.emit(format!("PyTuple_SET_ITEM({tuple}, {index}, Py_NewRef({value}));"));
+        }
+        tuple
+    }
+
+    fn binary(&mut self, op: BinOp, left: &Expr, right: &Expr, ty: &Ty) -> String {
+        if matches!(op, BinOp::And | BinOp::Or) {
+            let result = self.temp(Repr::Bool);
+            let first = self.expr(left);
+            self.emit(format!("{result} = {first};"));
+            self.emit(format!("if ({}{result}) {{", if op == BinOp::And { "" } else { "!" }));
+            let second = self.expr(right);
+            self.emit(format!("{result} = {second};"));
+            self.emit("}");
+            return result;
+        }
+        let operand = self.resolve(&left.ty);
+        let a = self.expr(left);
+        let b = self.expr(right);
+        if op == BinOp::In {
+            let item = self.box_value(&a, &left.ty);
+            return self.call(Repr::Bool, format!("PySequence_Contains({b}, {item})"));
+        }
+        if operand == Ty::Dyn || self.resolve(&right.ty) == Ty::Dyn {
+            return self.object_binary(op, &a, &b, ty);
+        }
+        // Unboxed options are compared as records.
+        let (a, b) = (self.stored(&a, &left.ty), self.stored(&b, &right.ty));
+        match self.storage(&left.ty) {
+            Repr::I64 => self.int_binary(op, &a, &b),
+            Repr::F64 => match op {
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => format!("({a} {} {b})", op.text()),
+                BinOp::FloorDiv => format!("nt_floordiv_f64({a}, {b})"),
+                BinOp::Mod => format!("nt_mod_f64({a}, {b})"),
+                BinOp::Pow => format!("pow({a}, {b})"),
+                _ => format!("({a} {} {b})", op.text()),
+            },
+            Repr::Bool | Repr::Unit => format!("({a} {} {b})", op.text()),
+            _ => {
+                if op == BinOp::Add && matches!(operand, Ty::List(_)) {
+                    return self.call(Repr::Obj, format!("nt_list_concat({a}, {b})"));
+                }
+                let result = self.object_binary(op, &a, &b, &Ty::Dyn);
+                if op.is_comparison() {
+                    let flag = self.call(Repr::Bool, format!("PyObject_IsTrue({result})"));
+                    return flag;
+                }
+                self.unbox(&result, self.repr(ty))
+            }
+        }
+    }
+
+    fn int_binary(&mut self, op: BinOp, a: &str, b: &str) -> String {
+        let checked = |gen: &mut Self, call: String| {
+            let result = gen.temp(Repr::I64);
+            gen.check(&format!("{} < 0", call.replace("OUT", &format!("&{result}"))));
+            result
+        };
+        match op {
+            BinOp::Add | BinOp::Sub | BinOp::Mul => {
+                let builtin = match op {
+                    BinOp::Add => "add",
+                    BinOp::Sub => "sub",
+                    _ => "mul",
+                };
+                let result = self.temp(Repr::I64);
+                let fail = self.fail();
+                self.emit(format!("if (__builtin_{builtin}_overflow({a}, {b}, &{result})) {{ nt_overflow(); {fail} }}"));
+                result
+            }
+            BinOp::Div => format!("((double){a} / (double){b})"),
+            BinOp::FloorDiv => checked(self, format!("nt_floordiv_i64({a}, {b}, OUT)")),
+            BinOp::Mod => checked(self, format!("nt_mod_i64({a}, {b}, OUT)")),
+            BinOp::Pow => checked(self, format!("nt_pow_i64({a}, {b}, OUT)")),
+            _ => format!("({a} {} {b})", op.text()),
+        }
+    }
+
+    fn object_binary(&mut self, op: BinOp, a: &str, b: &str, ty: &Ty) -> String {
+        let compare = match op {
+            BinOp::Eq => Some("Py_EQ"),
+            BinOp::Ne => Some("Py_NE"),
+            BinOp::Lt => Some("Py_LT"),
+            BinOp::Le => Some("Py_LE"),
+            BinOp::Gt => Some("Py_GT"),
+            BinOp::Ge => Some("Py_GE"),
+            _ => None,
+        };
+        if let Some(compare) = compare {
+            return self.call(Repr::Obj, format!("PyObject_RichCompare({a}, {b}, {compare})"));
+        }
+        let extra = if op == BinOp::Pow { ", Py_None" } else { "" };
+        let result = self.call(Repr::Obj, format!("{}({a}, {b}{extra})", py_number(op)));
+        if self.repr(ty) == Repr::Obj { result } else { self.unbox(&result, self.repr(ty)) }
+    }
 }
