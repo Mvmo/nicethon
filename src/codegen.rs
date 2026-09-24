@@ -1513,4 +1513,279 @@ impl<'a> Gen<'a> {
         let result = self.call(Repr::Obj, format!("{}({a}, {b}{extra})", py_number(op)));
         if self.repr(ty) == Repr::Obj { result } else { self.unbox(&result, self.repr(ty)) }
     }
+
+    fn enter_loop(&mut self, brk: &str, cont: &str, result: Option<(String, Ty)>) {
+        let (mark, cleanups) = (self.mark(), self.f.cleanups.len());
+        self.f.loops.push(LoopCtx { brk: brk.into(), cont: cont.into(), result, mark, cleanups });
+    }
+
+    fn loop_body(&mut self, body: &Expr) {
+        let mark = self.mark();
+        self.expr(body);
+        self.release(mark);
+        let cont = self.f.loops.last().unwrap().cont.clone();
+        self.emit(format!("{cont}:;"));
+    }
+
+    fn for_loop(&mut self, pattern: &Pattern, iterable: &Expr, body: &Expr) {
+        let (brk, cont) = (self.label("break"), self.label("continue"));
+        let item_ty = pattern.ty.clone();
+        if let ExprKind::Range(start, end, inclusive) = &iterable.kind {
+            let start = self.expr(start);
+            let end = self.expr(end);
+            let (counter, limit) = (self.temp(Repr::I64), self.temp(Repr::I64));
+            self.emit(format!("{limit} = {end}{};", if *inclusive { " + 1" } else { "" }));
+            self.emit(format!("for ({counter} = {start}; {counter} < {limit}; {counter}++) {{"));
+            self.enter_loop(&brk, &cont, None);
+            self.loop_item(pattern, &counter, &Ty::Int, body);
+            self.f.loops.pop();
+            self.emit("}");
+        } else if let Ty::List(_) = self.resolve(&iterable.ty) {
+            let list = self.expr(iterable);
+            let index = self.temp(Repr::I64);
+            self.emit(format!("for ({index} = 0; {index} < nt_list_len({list}); {index}++) {{"));
+            self.enter_loop(&brk, &cont, None);
+            let mark = self.mark();
+            let item = self.list_get(&list, &index, &item_ty);
+            self.loop_item(pattern, &item, &item_ty, body);
+            self.release(mark);
+            self.f.loops.pop();
+            self.emit("}");
+        } else {
+            let iterable_value = self.expr(iterable);
+            let iterator = self.call(Repr::Obj, format!("PyObject_GetIter({iterable_value})"));
+            self.emit("for (;;) {");
+            self.enter_loop(&brk, &cont, None);
+            let mark = self.mark();
+            let item = self.temp(Repr::Obj);
+            let fail = self.fail();
+            self.emit(format!("{item} = PyIter_Next({iterator});"));
+            self.emit(format!("if (!{item}) {{ if (PyErr_Occurred()) {fail} goto {brk}; }}"));
+            let repr = self.repr(&item_ty);
+            let value = self.unbox(&item, repr);
+            self.loop_item(pattern, &value, &item_ty, body);
+            self.release(mark);
+            self.f.loops.pop();
+            self.emit("}");
+        }
+        self.emit(format!("{brk}:;"));
+    }
+
+    fn loop_item(&mut self, pattern: &Pattern, item: &str, item_ty: &Ty, body: &Expr) {
+        let item = self.coerce(item, item_ty, &pattern.ty);
+        self.pattern(pattern, &item, &mut |gen| gen.loop_body(body));
+    }
+
+    fn region_temps(&mut self, from: usize) {
+        let clears: Vec<String> = self.f.created[from..].iter().map(|name| format!("Py_CLEAR({name});")).collect();
+        if !clears.is_empty() {
+            self.emit(clears.join(" "));
+        }
+    }
+
+    fn try_stmt(&mut self, body: &Expr, catches: &[Catch], finally: Option<&Expr>) {
+        let (catch_label, end) = (self.label("catch"), self.label("try_end"));
+        let exception = self.temp(Repr::Obj);
+        let region = self.f.created.len();
+        let outer_error = std::mem::replace(&mut self.f.error, catch_label.clone());
+        if let Some(finally) = finally {
+            self.f.cleanups.push(Cleanup::Finally(finally.clone()));
+        }
+        self.stmt(body);
+        if finally.is_some() {
+            self.f.cleanups.pop();
+        }
+        self.f.error = outer_error;
+        if let Some(finally) = finally {
+            self.stmt(finally);
+        }
+        self.emit(format!("goto {end};"));
+        self.emit(format!("{catch_label}:"));
+        self.region_temps(region);
+        self.emit(format!("{exception} = PyErr_GetRaisedException();"));
+        self.emit("if (0) {");
+        for catch in catches {
+            let filters: Vec<String> = catch.filters.iter().map(|f| self.expr(f)).collect();
+            let condition = if filters.is_empty() {
+                format!("nt_matches({exception}, NULL)")
+            } else {
+                filters.iter().map(|f| format!("nt_matches({exception}, {f})")).collect::<Vec<_>>().join(" || ")
+            };
+            self.emit(format!("}} else if ({condition}) {{"));
+            let error = self.call(Repr::Obj, format!("nt_make_pyerr({exception})"));
+            self.emit(format!("Py_CLEAR({exception});"));
+            self.write_local(catch.local, &error, &Ty::Dyn, true);
+            if let Some(finally) = finally {
+                self.f.cleanups.push(Cleanup::Finally(finally.clone()));
+            }
+            self.stmt(&catch.body);
+            if finally.is_some() {
+                self.f.cleanups.pop();
+            }
+            if let Some(finally) = finally {
+                self.stmt(finally);
+            }
+            self.emit(format!("goto {end};"));
+        }
+        self.emit("}");
+        if let Some(finally) = finally {
+            self.stmt(finally);
+        }
+        let fail = self.fail();
+        self.emit(format!("PyErr_SetRaisedException({exception}); {exception} = NULL; {fail}"));
+        self.emit(format!("{end}:;"));
+    }
+
+    fn try_expr(&mut self, inner: &Expr, ty: &Ty) -> String {
+        let args = self.owner_args(ty);
+        let (catch_label, end) = (self.label("catch"), self.label("try_end"));
+        let result = self.temp(Repr::Obj);
+        let exception = self.temp(Repr::Obj);
+        let region = self.f.created.len();
+        let outer_error = std::mem::replace(&mut self.f.error, catch_label.clone());
+        let value = self.expr(inner);
+        let value = self.coerce(&value, &inner.ty, &args[0]);
+        self.f.error = outer_error;
+        let ok = self.make_record(self.ok, &args, &[value]);
+        self.emit(format!("{result} = Py_NewRef({ok});"));
+        self.emit(format!("goto {end};"));
+        self.emit(format!("{catch_label}:"));
+        self.region_temps(region);
+        self.emit(format!("{exception} = PyErr_GetRaisedException();"));
+        let fail = self.fail();
+        self.emit(format!("if (!nt_matches({exception}, NULL)) {{ PyErr_SetRaisedException({exception}); {exception} = NULL; {fail} }}"));
+        let error = self.call(Repr::Obj, format!("nt_make_pyerr({exception})"));
+        let err = self.make_record(self.err, &args, &[error]);
+        self.emit(format!("{result} = Py_NewRef({err});"));
+        self.emit(format!("{end}:;"));
+        result
+    }
+
+    fn with_stmt(&mut self, manager: &Expr, local: Option<usize>, body: &Expr) {
+        let manager_value = self.expr(manager);
+        let exit_name = self.string("__exit__");
+        let enter_name = self.string("__enter__");
+        let exit = self.call(Repr::Obj, format!("PyObject_GetAttr({manager_value}, {exit_name})"));
+        let entered = self.call(Repr::Obj, format!("PyObject_CallMethodNoArgs({manager_value}, {enter_name})"));
+        if let Some(local) = local {
+            let ty = self.body().locals[local].ty.clone();
+            let value = self.checked_value(&entered, &ty, "");
+            self.write_local(local, &value, &ty, true);
+        }
+        let (catch_label, end) = (self.label("with_error"), self.label("with_end"));
+        let exception = self.temp(Repr::Obj);
+        let region = self.f.created.len();
+        let outer_error = std::mem::replace(&mut self.f.error, catch_label.clone());
+        self.f.cleanups.push(Cleanup::WithExit(exit.clone()));
+        self.stmt(body);
+        self.f.cleanups.pop();
+        self.f.error = outer_error;
+        self.call(Repr::Obj, format!("nt_with_exit({exit}, NULL)"));
+        self.emit(format!("goto {end};"));
+        self.emit(format!("{catch_label}:"));
+        self.region_temps(region);
+        self.emit(format!("{exception} = PyErr_GetRaisedException();"));
+        let outcome = self.temp(Repr::Obj);
+        let fail = self.fail();
+        self.emit(format!("{outcome} = nt_with_exit({exit}, {exception});"));
+        self.emit(format!("if (!{outcome}) {fail}"));
+        self.emit(format!("if (!PyObject_IsTrue({outcome})) {{ PyErr_SetRaisedException({exception}); {exception} = NULL; {fail} }}"));
+        self.emit(format!("{end}:;"));
+    }
+
+    // Patterns: tests become nested ifs, on_match runs inside the innermost one.
+
+    fn pattern(&mut self, pattern: &Pattern, value: &str, on_match: &mut dyn FnMut(&mut Self)) {
+        match &pattern.kind {
+            PatKind::Wild => on_match(self),
+            PatKind::Bind(local) => {
+                self.write_local(*local, value, &pattern.ty, true);
+                on_match(self);
+            }
+            PatKind::Lit(literal) => {
+                let expected = self.expr(literal);
+                let condition = match self.repr(&pattern.ty) {
+                    Repr::Obj => format!("PyObject_RichCompareBool({value}, {expected}, Py_EQ) == 1"),
+                    _ => format!("{value} == {expected}"),
+                };
+                self.emit(format!("if ({condition}) {{"));
+                on_match(self);
+                self.emit("}");
+            }
+            PatKind::Variant(def, fields) if self.repr(&pattern.ty).is_option() => {
+                let repr = self.repr(&pattern.ty);
+                let (present, payload) = if repr == Repr::OptObj { (value.to_string(), value.to_string()) } else { (format!("{value}.tag"), format!("{value}.value")) };
+                let negate = if *def == self.some { "" } else { "!" };
+                self.emit(format!("if ({negate}{present}) {{"));
+                let items: Vec<(&Pattern, String)> = fields.iter().map(|(_, sub)| (sub, payload.clone())).collect();
+                self.pattern_list(&items, on_match);
+                self.emit("}");
+            }
+            PatKind::Variant(def, fields) => {
+                let record = self.record(*def, &self.owner_args(&pattern.ty));
+                let test = matches!(self.p.defs[*def].kind, DefKind::Variant { .. });
+                if test {
+                    self.emit(format!("if (Py_IS_TYPE({value}, (PyTypeObject *)&T{record})) {{"));
+                }
+                let items: Vec<(&Pattern, String)> = fields.iter().map(|(index, sub)| (sub, self.field(value, *def, *index, &pattern.ty, &sub.ty))).collect();
+                self.pattern_list(&items, on_match);
+                if test {
+                    self.emit("}");
+                }
+            }
+            PatKind::Tuple(items) => {
+                let values: Vec<(&Pattern, String)> = items.iter().enumerate().map(|(index, sub)| {
+                    let repr = self.repr(&sub.ty);
+                    (sub, self.unbox(&format!("PyTuple_GET_ITEM({value}, {index})"), repr))
+                }).collect();
+                self.pattern_list(&values, on_match);
+            }
+            PatKind::List(items, rest) => {
+                let comparison = if *rest { ">=" } else { "==" };
+                self.emit(format!("if (nt_list_len({value}) {comparison} {}) {{", items.len()));
+                let values: Vec<(&Pattern, String)> = items.iter().enumerate().map(|(index, sub)| {
+                    let item = self.call(Repr::Obj, format!("nt_list_get_obj({value}, {index})"));
+                    let repr = self.repr(&sub.ty);
+                    (sub, self.unbox(&item, repr))
+                }).collect();
+                self.pattern_list(&values, on_match);
+                self.emit("}");
+            }
+            PatKind::Or(alternatives) => {
+                let matched = self.temp(Repr::Bool);
+                for alternative in alternatives {
+                    self.emit(format!("if (!{matched}) {{"));
+                    self.pattern(alternative, value, &mut |gen| gen.emit(format!("{matched} = 1;")));
+                    self.emit("}");
+                }
+                self.emit(format!("if ({matched}) {{"));
+                on_match(self);
+                self.emit("}");
+            }
+            PatKind::TypeTest(local) => {
+                let ty = self.body().locals[*local].ty.clone();
+                let spec = self.spec(&ty);
+                let converted = self.temp(Repr::Obj);
+                self.emit(format!("{converted} = nt_try_convert({value}, {});", c_string(&spec)));
+                self.emit(format!("if ({converted}) {{"));
+                let repr = self.repr(&ty);
+                let unboxed = self.unbox(&converted, repr);
+                self.write_local(*local, &unboxed, &ty, true);
+                on_match(self);
+                self.emit("}");
+            }
+            PatKind::PyNone => {
+                self.emit(format!("if ({value} == Py_None) {{"));
+                on_match(self);
+                self.emit("}");
+            }
+        }
+    }
+
+    fn pattern_list(&mut self, items: &[(&Pattern, String)], on_match: &mut dyn FnMut(&mut Self)) {
+        match items.split_first() {
+            None => on_match(self),
+            Some(((pattern, value), rest)) => self.pattern(pattern, value, &mut |gen| gen.pattern_list(rest, on_match)),
+        }
+    }
 }
