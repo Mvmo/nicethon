@@ -11,6 +11,34 @@ Nicethon compiles to C against the CPython C API. The result is a normal
 CPython extension module, so typed code runs as native code while every
 Python library keeps working.
 
+## Setup
+
+Needs Rust (cargo), a C compiler (clang or gcc) and CPython 3.12 or newer
+with its headers.
+
+```bash
+cargo build --release
+```
+
+```bash
+./target/release/nicethon run hello.nice
+```
+
+`cargo install --path .` puts `nicethon` on the PATH.
+
+| Command | Does |
+|---|---|
+| `nicethon check file.nice` | type check only |
+| `nicethon run file.nice` | compile, then run `main()` |
+| `nicethon build file.nice -o build` | write `build/file.c` and the extension module `build/file.cpython-*.so` |
+
+Flags: `--release` compiles the C code with `-O2` instead of `-O1`.
+Arguments after `--` go to the program (`sys.argv`). `CC` picks the C
+compiler (default `cc`).
+`--python path` picks the interpreter. Without it, the active virtualenv
+(`$VIRTUAL_ENV`) is used, otherwise `python3`. The packages installed for
+that interpreter are the ones a program can import.
+
 ## Taste
 
 ```

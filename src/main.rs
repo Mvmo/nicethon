@@ -1,5 +1,6 @@
 mod ast;
 mod check;
+mod codegen;
 mod expr;
 mod hir;
 mod lexer;
@@ -10,6 +11,7 @@ use std::process::{exit, Command};
 
 const PRELUDE: &str = include_str!("../lib/prelude.nice");
 const BINDINGS: &str = include_str!("../lib/bindings.nice");
+const RUNTIME: &str = include_str!("../runtime/nicethon.h");
 
 struct Loaded {
     names: Vec<String>,
@@ -88,6 +90,52 @@ fn load(entry: &Path) -> Loaded {
     loaded
 }
 
+fn python_config(python: &str) -> (String, String) {
+    let script = "import sysconfig; print(sysconfig.get_paths()['include']); print(sysconfig.get_config_var('EXT_SUFFIX'))";
+    let output = Command::new(python).args(["-c", script]).output().unwrap_or_else(|error| {
+        eprintln!("cannot run {python}: {error}");
+        exit(1)
+    });
+    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    let mut lines = text.lines();
+    (lines.next().unwrap_or_default().to_string(), lines.next().unwrap_or(".so").to_string())
+}
+
+fn build(entry: &Path, out_dir: &Path, python: &str, release: bool) -> String {
+    let loaded = load(entry);
+    let module_name = entry.file_stem().unwrap().to_string_lossy().to_string();
+    if !module_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        eprintln!("{}: the file name must only use letters, digits and _, it becomes the python module name", entry.display());
+        exit(1);
+    }
+    let program = match check::check(&loaded.sources, 2) {
+        Ok(program) => program,
+        Err(diags) => report(&loaded, &diags.into_iter().map(|d| (d.module, d.pos, d.message)).collect::<Vec<_>>()),
+    };
+    let c_source = codegen::generate(&program, &module_name, &loaded.names, &loaded.texts);
+    std::fs::create_dir_all(out_dir).unwrap();
+    std::fs::write(out_dir.join("nicethon.h"), RUNTIME).unwrap();
+    let c_path = out_dir.join(format!("{module_name}.c"));
+    std::fs::write(&c_path, c_source).unwrap();
+    let (include, suffix) = python_config(python);
+    let output = out_dir.join(format!("{module_name}{suffix}"));
+    let mut cc = Command::new(std::env::var("CC").unwrap_or("cc".into()));
+    cc.args(["-shared", "-fPIC", "-w", "-std=c11"]).arg(if release { "-O2" } else { "-O1" }).arg(format!("-I{include}")).arg(format!("-I{}", out_dir.display()));
+    if cfg!(target_os = "macos") {
+        cc.args(["-undefined", "dynamic_lookup"]);
+    }
+    cc.arg(&c_path).arg("-o").arg(&output);
+    let status = cc.status().unwrap_or_else(|error| {
+        eprintln!("cannot run the C compiler: {error}");
+        exit(1)
+    });
+    if !status.success() {
+        eprintln!("C compilation failed, see {}", c_path.display());
+        exit(1);
+    }
+    module_name
+}
+
 fn main() {
     let all: Vec<String> = std::env::args().skip(1).collect();
     let split = all.iter().position(|a| a == "--").unwrap_or(all.len());
@@ -109,9 +157,30 @@ fn main() {
                 report(&loaded, &diags.into_iter().map(|d| (d.module, d.pos, d.message)).collect::<Vec<_>>());
             }
         }
+        "build" => {
+            let out_dir = PathBuf::from(flag("-o").unwrap_or("build".into()));
+            build(&entry, &out_dir, &python, release);
+        }
+        "run" => {
+            let out_dir = std::env::temp_dir().join("nicethon-build").join(entry.canonicalize().map(|p| format!("{:x}", hash(&p))).unwrap_or_default());
+            let module = build(&entry, &out_dir, &python, release);
+            let script = format!("import sys, importlib; sys.argv = sys.argv[1:]; sys.path.insert(0, {:?}); importlib.import_module({module:?}).main()", out_dir.display().to_string());
+            let status = Command::new(&python).args(["-c", &script, file]).args(program_args).status().unwrap();
+            if status.code().is_none() {
+                eprintln!("the program crashed ({status})");
+            }
+            exit(status.code().unwrap_or(1));
+        }
         _ => {
             eprintln!("unknown command {command}");
             exit(2);
         }
     }
+}
+
+fn hash(path: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    hasher.finish()
 }
