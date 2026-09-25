@@ -1,0 +1,4 @@
+// Smallest program: main is the entry point.
+fn main() {
+    print("Hello, Nicethon!");
+}
