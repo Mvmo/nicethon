@@ -1788,4 +1788,235 @@ impl<'a> Gen<'a> {
             Some(((pattern, value), rest)) => self.pattern(pattern, value, &mut |gen| gen.pattern_list(rest, on_match)),
         }
     }
+
+    // Module:
+
+    fn run(&mut self) -> String {
+        let p = self.p;
+        self.record(self.pyerr, &[]);
+        for body in &p.fns {
+            if p.sig(body.def).generics.is_empty() {
+                self.instance(body.def, &[]);
+            }
+        }
+        self.drain();
+        self.setup();
+        self.drain();
+        let types = self.types();
+        let mut head = String::from("#include \"nicethon.h\"\n\nstatic int nt_ready(void);\n");
+        for index in 0..self.strings.len() {
+            writeln!(head, "static PyObject *K{index};").unwrap();
+        }
+        for index in 0..self.kwnames.len() {
+            writeln!(head, "static PyObject *KW{index};").unwrap();
+        }
+        for (index, global) in p.globals.iter().enumerate() {
+            let repr = global.ty.repr();
+            let repr = if repr == Repr::Unit { Repr::Obj } else { repr };
+            writeln!(head, "static {} G{index};", c_type(repr)).unwrap();
+        }
+        let mut decls = String::new();
+        for (instance, (def, _)) in self.instances.iter().enumerate() {
+            writeln!(decls, "{};\n{};\nstatic PyObject *W{instance}(PyObject *, PyObject *const *, Py_ssize_t, PyObject *);\nstatic PyObject *V{instance};", self.native_header(instance), self.adapter_header(instance)).unwrap();
+            for lambda in 0..p.fns[self.bodies[def]].lambdas.len() {
+                let (params, ret) = self.lambda_types(instance, lambda);
+                writeln!(decls, "{};\nstatic PyObject *L{instance}_{lambda}(PyObject *, PyObject *const *, Py_ssize_t, PyObject *);", self.native_signature(&format!("N{instance}_{lambda}"), &params, &ret)).unwrap();
+            }
+        }
+        let ready = self.ready();
+        format!("{head}\n{types}\n{decls}\n{}{ready}", self.code)
+    }
+
+    fn drain(&mut self) {
+        while let Some(instance) = self.pending.pop() {
+            self.native(instance);
+        }
+    }
+
+    // Writing a descriptor can create more record instances, so loop until done.
+    fn types(&mut self) -> String {
+        let mut text = String::new();
+        let mut index = 0;
+        while index < self.records.len() {
+            let (def, args) = self.records[index].clone();
+            let p = self.p;
+            let info = &p.defs[def];
+            let fields = p.fields(def);
+            let mut members = String::new();
+            let mut descriptors = String::new();
+            for (position, field) in fields.iter().enumerate() {
+                let ty = field.ty.subst(&args);
+                let repr = match self.storage(&ty) {
+                    Repr::Unit => Repr::Obj,
+                    repr => repr,
+                };
+                write!(members, " {} f{position};", c_type(repr)).unwrap();
+                let name = field.name.clone().unwrap_or_default();
+                let spec = self.spec(&ty);
+                write!(descriptors, "{{{}, {}, offsetof(S{index}, f{position}), {}, {}}}, ", c_string(&name), kind(repr), c_string(&spec), c_string(&self.show(&ty))).unwrap();
+            }
+            let (qualname, enum_id) = match &info.kind {
+                DefKind::Variant { parent, .. } => (format!("{}.{}.{}", self.module, p.defs[*parent].name, info.name), self.enum_id(*parent, &args) as i64),
+                _ => (format!("{}.{}", self.module, info.name), -1),
+            };
+            writeln!(text, "typedef struct {{ PyObject_HEAD{members} }} S{index};").unwrap();
+            let descriptor = if fields.is_empty() {
+                writeln!(text, "static PyObject *U{index};").unwrap();
+                "NULL".to_string()
+            } else {
+                writeln!(text, "static const nt_Field D{index}[] = {{{descriptors}}};").unwrap();
+                format!("D{index}")
+            };
+            writeln!(text, "static nt_RecordType T{index} = NT_RECORD_TYPE({}, {}, S{index}, {descriptor}, {}, {enum_id});", c_string(&qualname), c_string(&info.name), fields.len()).unwrap();
+            index += 1;
+        }
+        text
+    }
+
+    fn ready(&self) -> String {
+        let mut text = format!("static PyTypeObject *nt_type_table[{}];\n\nstatic int nt_ready(void) {{\n", self.records.len() + 1);
+        for (index, (def, _)) in self.records.iter().enumerate() {
+            writeln!(text, "    if (PyType_Ready((PyTypeObject *)&T{index}) < 0) return -1;\n    nt_type_table[{index}] = (PyTypeObject *)&T{index};").unwrap();
+            if self.p.fields(*def).is_empty() {
+                writeln!(text, "    if (!(U{index} = nt_record_alloc((PyTypeObject *)&T{index}))) return -1;").unwrap();
+            }
+        }
+        writeln!(text, "    nt_types = nt_type_table;\n    nt_pyerr_type = (PyTypeObject *)&T{};", self.record_index[&(self.pyerr, vec![])]).unwrap();
+        for (instance, (def, _)) in self.instances.iter().enumerate() {
+            let name = c_string(&self.p.defs[*def].name);
+            writeln!(text, "    if (!(V{instance} = nt_closure_new(W{instance}, (void *)NF{instance}, NULL, {name}))) return -1;").unwrap();
+        }
+        text.push_str("    return 0;\n}\n");
+        text
+    }
+
+    fn setup(&mut self) {
+        let entry = self.p.entry_module;
+        let module_name = self.module.to_string();
+        let setup = |gen: &mut Self| {
+            gen.emit("if (nt_init_runtime() < 0 || nt_ready() < 0) goto error;");
+            let module_object = gen.call(Repr::Obj, format!("PyUnicode_FromString({})", c_string(&module_name)));
+            let mut order: Vec<usize> = (0..gen.p.globals.len()).collect();
+            order.sort_by_key(|&index| match gen.p.globals[index].init {
+                GlobalInit::Import(_) => 0,
+                GlobalInit::Attr(..) => 1,
+                GlobalInit::Value(_) => 2,
+                GlobalInit::Class(_) => 3,
+                GlobalInit::Decorated(..) => 4,
+            });
+            for index in order {
+                let global = &gen.p.globals[index];
+                gen.set_line(global.pos);
+                gen.f.module = global.module;
+                let value = match &global.init {
+                    GlobalInit::Import(name) => gen.call(Repr::Obj, format!("PyImport_ImportModule({})", c_string(name))),
+                    GlobalInit::Attr(module, name) => {
+                        let attr = gen.string(name);
+                        let raw = gen.call(Repr::Obj, format!("PyObject_GetAttr(G{module}, {attr})"));
+                        let value = gen.checked_value(&raw, &global.ty, name);
+                        gen.stored(&value, &global.ty)
+                    }
+                    GlobalInit::Value(value) => {
+                        let result = gen.expr(value);
+                        let result = gen.coerce(&result, &value.ty, &global.ty);
+                        gen.stored(&result, &global.ty)
+                    }
+                    GlobalInit::Class(def) => gen.py_class(*def, &module_object),
+                    GlobalInit::Decorated(def, decorators) => {
+                        let mut current = format!("V{}", gen.instance(*def, &[]));
+                        for decorator in decorators {
+                            let function = gen.expr(decorator);
+                            current = gen.vectorcall(&function, &[current], None);
+                        }
+                        gen.checked_value(&current, &global.ty, "")
+                    }
+                };
+                let repr = global.ty.repr();
+                match repr {
+                    Repr::Obj | Repr::Unit => gen.emit(format!("G{index} = Py_NewRef({value});")),
+                    _ => gen.emit(format!("G{index} = {value};")),
+                }
+            }
+            gen.f.module = entry;
+            gen.exports();
+        };
+        let header = "static int nt_setup(PyObject *module)".to_string();
+        let mut kwnames_setup = String::new();
+        let mut strings_setup = String::new();
+        self.function(header, "<module>", Func { module: entry, ..Default::default() }, setup, None);
+        for (index, text) in self.strings.iter().enumerate() {
+            writeln!(strings_setup, "    K{index} = PyUnicode_InternFromString({});\n    if (!K{index}) return -1;", c_string(text)).unwrap();
+        }
+        for (index, names) in self.kwnames.iter().enumerate() {
+            let items: Vec<String> = names.iter().map(|n| format!("PyUnicode_InternFromString({})", c_string(n))).collect();
+            writeln!(kwnames_setup, "    KW{index} = PyTuple_Pack({}, {});\n    if (!KW{index}) return -1;", items.len(), items.join(", ")).unwrap();
+        }
+        let module = self.module;
+        write!(
+            self.code,
+            "static int nt_constants(void) {{\n{strings_setup}{kwnames_setup}    return 0;\n}}\n\n\
+             static struct PyModuleDef nt_module = {{PyModuleDef_HEAD_INIT, {}, NULL, -1, NULL}};\n\n\
+             PyMODINIT_FUNC PyInit_{module}(void) {{\n    PyObject *module = PyModule_Create(&nt_module);\n    if (!module) return NULL;\n    if (nt_constants() < 0 || nt_setup(module) < 0) {{\n        Py_DECREF(module);\n        return NULL;\n    }}\n    return module;\n}}\n",
+            c_string(module)
+        )
+        .unwrap();
+    }
+
+    fn py_class(&mut self, def: DefId, module_object: &str) -> String {
+        let DefKind::PyClass { methods, bases, .. } = &self.p.defs[def].kind else { unreachable!() };
+        let dict = self.call(Repr::Obj, "PyDict_New()".into());
+        let module_key = self.string("__module__");
+        self.check(&format!("PyDict_SetItem({dict}, {module_key}, {module_object}) < 0"));
+        for (name, method) in methods {
+            let key = self.string(name);
+            let function = format!("V{}", self.instance(*method, &[]));
+            let function = self.call(Repr::Obj, format!("PyInstanceMethod_New({function})"));
+            self.check(&format!("PyDict_SetItem({dict}, {key}, {function}) < 0"));
+        }
+        let values: Vec<String> = bases.iter().map(|b| self.expr(b)).collect();
+        let tuple = self.call(Repr::Obj, format!("PyTuple_New({})", values.len()));
+        for (index, value) in values.iter().enumerate() {
+            self.emit(format!("PyTuple_SET_ITEM({tuple}, {index}, Py_NewRef({value}));"));
+        }
+        let meta = values.first().map_or("(PyObject *)&PyType_Type".to_string(), |b| format!("(PyObject *)Py_TYPE({b})"));
+        let name = c_string(&self.p.defs[def].name);
+        self.call(Repr::Obj, format!("PyObject_CallFunction({meta}, \"sOO\", {name}, {tuple}, {dict})"))
+    }
+
+    fn exports(&mut self) {
+        let entry = self.p.entry_module;
+        for (def, info) in self.p.defs.iter().enumerate() {
+            if info.module != entry || !info.export {
+                continue;
+            }
+            let generic = |owner: DefId| matches!(&self.p.defs[owner].kind, DefKind::Struct { generics, .. } | DefKind::Enum { generics, .. } if !generics.is_empty());
+            let value = match &info.kind {
+                DefKind::Fn(sig) if sig.kind == FnKind::Native && sig.owner.is_none() => format!("V{}", self.instance(def, &[])),
+                DefKind::Struct { .. } if !generic(def) => format!("(PyObject *)&T{}", self.record(def, &[])),
+                DefKind::Variant { parent, .. } if !generic(*parent) => format!("(PyObject *)&T{}", self.record(def, &[])),
+                DefKind::PyClass { global, .. } => format!("G{global}"),
+                _ => continue,
+            };
+            self.check(&format!("PyModule_AddObjectRef(module, {}, {value}) < 0", c_string(&info.name)));
+        }
+    }
+}
+
+fn py_number(op: BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "PyNumber_Add",
+        BinOp::Sub => "PyNumber_Subtract",
+        BinOp::Mul => "PyNumber_Multiply",
+        BinOp::Div => "PyNumber_TrueDivide",
+        BinOp::FloorDiv => "PyNumber_FloorDivide",
+        BinOp::Mod => "PyNumber_Remainder",
+        BinOp::Pow => "PyNumber_Power",
+        BinOp::MatMul => "PyNumber_MatrixMultiply",
+        BinOp::BitAnd => "PyNumber_And",
+        BinOp::BitOr => "PyNumber_Or",
+        BinOp::BitXor => "PyNumber_Xor",
+        BinOp::Shl => "PyNumber_Lshift",
+        BinOp::Shr => "PyNumber_Rshift",
+        _ => unreachable!("not a number operator"),
+    }
 }
