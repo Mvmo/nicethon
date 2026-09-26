@@ -39,6 +39,8 @@ compiler (default `cc`).
 (`$VIRTUAL_ENV`) is used, otherwise `python3`. The packages installed for
 that interpreter are the ones a program can import.
 
+Tests: `python3 tests/run.py` runs all golden tests (`tests/golden/`).
+
 ## Taste
 
 ```

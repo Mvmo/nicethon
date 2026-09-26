@@ -1,0 +1,36 @@
+// Bindings, numbers, loops and template strings.
+
+fn sum_to(limit: Int) -> Int {
+    var total = 0;
+    for number in 1..=limit {
+        total += number;
+    }
+    total
+}
+
+fn parity(number: Int) -> Str {
+    if number % 2 == 0 { "even" } else { "odd" }
+}
+
+fn main() {
+    let count = 10;
+    print(`sum_to(${count}) = ${sum_to(count)}`);
+
+    // "/" is always true division, "~/" is floor division (python "//"),
+    // "%" is floor modulo: the sign follows the divisor, like python.
+    print(`7 / 2 = ${7 / 2}`);
+    print(`7 ~/ 2 = ${7 ~/ 2}`);
+    print(`-7 ~/ 2 = ${-7 ~/ 2}`);
+    print(`-7 % 2 = ${-7 % 2}`);
+    print(`3 is ${parity(3)}`);
+
+    var countdown = 3;
+    while countdown > 0 {
+        print(countdown);
+        countdown -= 1;
+    }
+
+    let ratio: Float = 1;           // number literal takes the expected type
+    print(ratio);
+    print(count as Float / 4.0);
+}
