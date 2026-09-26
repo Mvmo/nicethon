@@ -1,0 +1,40 @@
+// Lambdas with "=>", closures, pipes.
+
+fn apply_twice(function: (Int) -> Int, value: Int) -> Int {
+    function(function(value))
+}
+
+fn make_counter() -> () -> Int {
+    var count = 0;
+    () => {
+        count += 1;
+        count
+    }
+}
+
+fn main() {
+    let numbers = [1, 2, 3, 4, 5, 6];
+
+    print(numbers.map(number => number * 2));
+
+    let even_squares = numbers
+        |> filter(number => number % 2 == 0)
+        |> map(number => number * number);
+    print(even_squares);
+
+    print(numbers |> fold(0, (total, number) => total + number));
+    print(apply_twice(value => value * 3, 2));
+
+    let add = (left: Int, right: Int) => left + right;
+    print(add(2, 3));
+
+    // count outlives make_counter: a captured var moves into a shared cell
+    let counter = make_counter();
+    counter();
+    counter();
+    print(counter());
+
+    let words = ["pear", "fig", "banana"];
+    print(words.sort_by(word => word.len()));
+    print((1..=4) |> map(number => number * 10) |> sum);
+}

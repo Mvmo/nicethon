@@ -1,0 +1,52 @@
+// Option instead of null. Result plus "?" for own errors.
+
+enum ParseError {
+    Empty,
+    NotANumber(text: Str),
+    Negative(value: Int),
+}
+
+fn parse_age(text: Str) -> Result<Int, ParseError> {
+    if text.is_empty() {
+        return Err(ParseError.Empty);
+    }
+    let value = match text.parse_int() {
+        Some(number) => number,
+        None => return Err(ParseError.NotANumber(text)),
+    };
+    if value < 0 {
+        return Err(ParseError.Negative(value));
+    }
+    Ok(value)
+}
+
+fn total_age(texts: List<Str>) -> Result<Int, ParseError> {
+    var total = 0;
+    for text in texts {
+        total += parse_age(text)?;
+    }
+    Ok(total)
+}
+
+fn first_even(numbers: List<Int>) -> Option<Int> {
+    for number in numbers {
+        if number % 2 == 0 {
+            return Some(number);
+        }
+    }
+    None
+}
+
+fn main() {
+    print(total_age(["31", "12"]));
+    print(total_age(["31", "", "12"]));
+    print(total_age(["31", "abc"]));
+    print(parse_age("-4"));
+
+    if let Some(number) = first_even([3, 5, 8, 9]) {
+        print(`first even: ${number}`);
+    }
+    let missing = first_even([1, 3]);
+    print(missing);
+    print(missing.unwrap_or(-1));
+}

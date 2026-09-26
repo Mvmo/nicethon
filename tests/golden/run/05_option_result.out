@@ -1,0 +1,7 @@
+Ok(43)
+Err(Empty)
+Err(NotANumber(text = "abc"))
+Err(Negative(value = -4))
+first even: 8
+None
+-1
