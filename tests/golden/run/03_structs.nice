@@ -1,0 +1,40 @@
+// Structs are immutable values. Methods live in impl blocks.
+
+struct Point {
+    x: Float;
+    y: Float;
+}
+
+impl Point {
+    fn origin() -> Point {
+        Point(x = 0.0, y = 0.0)
+    }
+
+    fn distance_to(self, other: Point) -> Float {
+        let delta_x = other.x - self.x;
+        let delta_y = other.y - self.y;
+        (delta_x * delta_x + delta_y * delta_y) ** 0.5
+    }
+}
+
+struct Particle {
+    position: Point;
+    mass: Float = 1.0;
+}
+
+fn main() {
+    let start = Point.origin();
+    let end = Point(3.0, 4.0);
+    print(start.distance_to(end));
+
+    let moved = end.copy(y = 0.0);      // copy with one field replaced
+    print(moved);
+    print(end);                         // unchanged
+
+    var particle = Particle(position = start);
+    print(particle.mass);               // default value
+    particle.mass = 2.5;                // allowed: particle is a var
+    print(particle);
+
+    print(Point(1.0, 2.0) == Point(1.0, 2.0));
+}

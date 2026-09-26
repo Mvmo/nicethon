@@ -1,0 +1,5 @@
+small: 3.141592653589793
+big: 6.0
+huge circle: 1256.6370614359173
+nothing: 0.0
+Rect(min = Point(x = 0.0, y = 0.0), max = Point(x = 2.0, y = 3.0))

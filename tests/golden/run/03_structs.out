@@ -1,0 +1,6 @@
+5.0
+Point(x = 3.0, y = 0.0)
+Point(x = 3.0, y = 4.0)
+1.0
+Particle(position = Point(x = 0.0, y = 0.0), mass = 2.5)
+true

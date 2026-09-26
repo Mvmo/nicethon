@@ -1,0 +1,45 @@
+// Enums with payload, exhaustive match, guards and alternatives.
+const PI: Float = 3.141592653589793;
+
+struct Point {
+    x: Float;
+    y: Float;
+}
+
+enum Shape {
+    Circle(center: Point, radius: Float),
+    Rect(min: Point, max: Point),
+    Empty,
+}
+
+fn area(shape: Shape) -> Float {
+    match shape {
+        Circle(_, radius) => PI * radius * radius,
+        Rect(min, max) => (max.x - min.x) * (max.y - min.y),
+        Empty => 0.0,
+    }
+}
+
+fn size_class(shape: Shape) -> Str {
+    match shape {
+        Empty => "nothing",
+        Circle(radius = radius, ..) if radius > 10.0 => "huge circle",
+        Circle(..) | Rect(..) => {
+            if area(shape) > 5.0 { "big" } else { "small" }
+        }
+    }
+}
+
+fn main() {
+    let origin = Point(0.0, 0.0);
+    let shapes = [
+        Shape.Circle(origin, radius = 1.0),
+        Shape.Rect(origin, Point(2.0, 3.0)),
+        Shape.Circle(origin, radius = 20.0),
+        Shape.Empty,
+    ];
+    for shape in shapes {
+        print(`${size_class(shape)}: ${area(shape)}`);
+    }
+    print(shapes[1]);
+}
