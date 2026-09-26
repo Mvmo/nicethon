@@ -171,9 +171,18 @@ not observable: structs behave like values.
 ## 9. Generics and traits
 
 - Generic functions and types: `fn largest<T: Ord>(items: List<T>) -> Option<T>`.
+- Generics are monomorphized: every generic function and every generic
+  struct or enum is compiled once per combination of concrete type
+  arguments it is used with, like Rust and C++ templates. `largest<Int>`
+  compares `int64_t` values in C, `Pair<Int, Float>` stores an `int64_t`
+  and a `double`. Only functions reachable from non-generic code are
+  compiled.
 - Traits are nominal: a type implements a trait only through
   `impl Trait for Type`, also for builtin types (`impl Describe for Int`).
   Traits may have default methods.
+- Trait method calls are direct C calls, also on type parameters
+  (`item.describe()` with `T: Describe`): every copy of a generic function
+  knows its concrete type, so the implementation is chosen at compile time.
 - Bounds are checked at the call site: `largest(points)` fails to compile
   if `Point` does not implement `Ord`.
 - Built-in traits: `Eq`, `Ord`, `Hash`, `Show`. Numbers, `Str`, `Bool` and

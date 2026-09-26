@@ -97,5 +97,6 @@ output.
 | Containers at the boundary | Passed by reference. Nicethon lists are native objects. Python sees them as sequences, and numpy wraps `List<Int>` and `List<Float>` without copying (buffer protocol). |
 | Lambdas | Thick arrow: `value => value * 2`, `(left, right) => left + right`, block bodies allowed. Python sees a normal callable. |
 | Values | `Int`, `Float` and `Bool` are plain C values (`int64_t`, `double`, `int`). Structs and enum variants are immutable records with native fields. |
+| Generics | Monomorphized: every generic function and type gets its own C code per concrete type. `largest<Int>` compares `int64_t` values, `Option<Int>` stores an `int64_t`, trait calls on type parameters are direct C calls. |
 | Python types | `lib/bindings.nice` declares types for a part of the stdlib. Other modules are `Dyn`. |
 | Compiler | Rust, no dependencies. Prelude, bindings and C runtime are embedded in the binary. |

@@ -1,0 +1,6 @@
+["dog named Rex", "dog named Bello"]
+ROBOT #42
+Some(9)
+Some("kiwi")
+None
+Pair(first = "one", second = 1)

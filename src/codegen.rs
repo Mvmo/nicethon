@@ -275,6 +275,54 @@ impl<'a> Gen<'a> {
         self.p.resolve(ty).map(&mut |ty| matches!(ty, Ty::Param(_)).then_some(Ty::Dyn))
     }
 
+    fn owner_args(&self, ty: &Ty) -> Vec<Ty> {
+        match self.resolve(ty) {
+            Ty::Named(_, args) => args,
+            _ => vec![],
+        }
+    }
+
+    fn instance(&mut self, def: DefId, targs: &[Ty]) -> usize {
+        let key = (def, targs.to_vec());
+        if let Some(&index) = self.instance_index.get(&key) {
+            return index;
+        }
+        self.instances.push(key.clone());
+        self.instance_index.insert(key, self.instances.len() - 1);
+        self.pending.push(self.instances.len() - 1);
+        self.instances.len() - 1
+    }
+
+    fn record(&mut self, def: DefId, args: &[Ty]) -> usize {
+        let key = (def, args.to_vec());
+        if let Some(&index) = self.record_index.get(&key) {
+            return index;
+        }
+        let index = self.records.len();
+        self.records.push(key.clone());
+        self.record_index.insert(key, index);
+        if let DefKind::Variant { parent, .. } = self.p.defs[def].kind {
+            self.enum_id(parent, args);
+        }
+        index
+    }
+
+    fn enum_id(&mut self, def: DefId, args: &[Ty]) -> usize {
+        let key = (def, args.to_vec());
+        if let Some(&id) = self.enums.get(&key) {
+            return id;
+        }
+        let id = self.enums.len();
+        self.enums.insert(key, id);
+        let p = self.p;
+        if let DefKind::Enum { variants, .. } = &p.defs[def].kind {
+            for &variant in variants {
+                self.record(variant, args);
+            }
+        }
+        id
+    }
+
     fn repr(&self, ty: &Ty) -> Repr {
         self.repr_of(&self.resolve(ty))
     }
@@ -791,6 +839,25 @@ impl<'a> Gen<'a> {
         let declared = self.erased(&sig.ret);
         let result = self.call(self.repr_of(&declared), call);
         self.coerce(&result, &declared, ty)
+    }
+
+    // A trait method called on a type parameter resolves to the implementation
+    // for the concrete type of this instance.
+    fn trait_target(&self, method: DefId, targs: &[Ty]) -> (DefId, Vec<Ty>) {
+        let targs: Vec<Ty> = targs.iter().map(|t| self.resolve(t)).collect();
+        let name = &self.p.defs[method].name;
+        for imp in &self.p.impls {
+            let mut bound = vec![None; imp.generics];
+            if imp.trait_def != self.p.sig(method).owner || !bind(&imp.target, &targs[0], &mut bound) {
+                continue;
+            }
+            let Some((_, chosen)) = imp.methods.iter().find(|(m, _)| m == name) else { break };
+            let own = self.p.sig(*chosen).generics.len() - imp.generics;
+            let mut args: Vec<Ty> = bound.into_iter().map(|ty| ty.unwrap_or(Ty::Dyn)).collect();
+            args.extend_from_slice(&targs[targs.len() - own..]);
+            return (*chosen, args);
+        }
+        (method, targs)
     }
 
     fn assign(&mut self, target: &str, value: &str, repr: Repr) {
@@ -2019,4 +2086,22 @@ fn py_number(op: BinOp) -> &'static str {
         BinOp::Shr => "PyNumber_Rshift",
         _ => unreachable!("not a number operator"),
     }
+}
+
+// Binds the type parameters of an impl target against a concrete type.
+fn bind(pattern: &Ty, concrete: &Ty, bound: &mut [Option<Ty>]) -> bool {
+    let pairs: Vec<(&Ty, &Ty)> = match (pattern, concrete) {
+        (Ty::Param(index), _) => {
+            if let Some(slot) = bound.get_mut(*index as usize) {
+                *slot = Some(concrete.clone());
+            }
+            return true;
+        }
+        (Ty::List(a), Ty::List(b)) | (Ty::Set(a), Ty::Set(b)) | (Ty::Coroutine(a), Ty::Coroutine(b)) => vec![(a, b)],
+        (Ty::Map(a, b), Ty::Map(c, d)) => vec![(a, c), (b, d)],
+        (Ty::Tuple(a), Ty::Tuple(b)) if a.len() == b.len() => a.iter().zip(b).collect(),
+        (Ty::Named(x, a), Ty::Named(y, b)) if x == y => a.iter().zip(b).collect(),
+        _ => return pattern == concrete,
+    };
+    pairs.into_iter().all(|(a, b)| bind(a, b, bound))
 }

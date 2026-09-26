@@ -1,0 +1,66 @@
+// Generic functions, traits and impls. Generics are monomorphized: one
+// native copy per concrete type, like Rust and C++ templates.
+
+trait Describe {
+    fn describe(self) -> Str;
+
+    fn shout(self) -> Str {
+        self.describe().upper()
+    }
+}
+
+struct Dog {
+    name: Str;
+}
+
+struct Robot {
+    serial: Int;
+}
+
+impl Describe for Dog {
+    fn describe(self) -> Str {
+        `dog named ${self.name}`
+    }
+}
+
+impl Describe for Robot {
+    fn describe(self) -> Str {
+        `robot #${self.serial}`
+    }
+}
+
+fn describe_all<T: Describe>(items: List<T>) -> List<Str> {
+    items.map(item => item.describe())
+}
+
+fn largest<T: Ord>(items: List<T>) -> Option<T> {
+    var best: Option<T> = None;
+    for item in items {
+        best = match best {
+            Some(current) if current >= item => Some(current),
+            _ => Some(item),
+        };
+    }
+    best
+}
+
+struct Pair<A, B> {
+    first: A;
+    second: B;
+}
+
+impl<A, B> Pair<A, B> {
+    fn swap(self) -> Pair<B, A> {
+        Pair(first = self.second, second = self.first)
+    }
+}
+
+fn main() {
+    print(describe_all([Dog("Rex"), Dog("Bello")]));
+    print(Robot(serial = 42).shout());
+    print(largest([3, 9, 2]));
+    print(largest(["kiwi", "apple"]));
+    let no_numbers: List<Int> = [];
+    print(largest(no_numbers));
+    print(Pair(first = 1, second = "one").swap());
+}
