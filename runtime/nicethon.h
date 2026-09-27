@@ -160,6 +160,7 @@ typedef struct {
     PyObject_HEAD
     Py_ssize_t length, capacity;
     int kind;
+    int exports;
     PyTypeObject *item_type;
     char *data;
 } nt_List;
@@ -363,6 +364,7 @@ static PyObject *nt_list_new(int kind, Py_ssize_t capacity) {
     list->length = 0;
     list->capacity = capacity > 4 ? capacity : 4;
     list->kind = kind;
+    list->exports = 0;
     list->item_type = NULL;
     list->data = PyMem_Malloc(list->capacity * 8);
     if (!list->data) {
@@ -374,6 +376,10 @@ static PyObject *nt_list_new(int kind, Py_ssize_t capacity) {
 
 static int nt_list_reserve(nt_List *list) {
     if (list->length < list->capacity) return 0;
+    if (list->exports > 0) {
+        PyErr_SetString(PyExc_BufferError, "cannot resize a list while a buffer view on it exists");
+        return -1;
+    }
     char *data = PyMem_Realloc(list->data, list->capacity * 2 * 8);
     if (!data) {
         PyErr_NoMemory();
@@ -633,6 +639,31 @@ static PyObject *nt_list_richcompare(PyObject *left, PyObject *right, int op) {
     return PyBool_FromLong(op == Py_EQ ? equal : !equal);
 }
 
+static int nt_list_getbuffer(PyObject *self, Py_buffer *view, int flags) {
+    nt_List *list = (nt_List *)self;
+    if (list->kind != NT_I64 && list->kind != NT_F64) {
+        PyErr_SetString(PyExc_BufferError, "only lists of Int or Float expose a buffer");
+        return -1;
+    }
+    view->obj = Py_NewRef(self);
+    view->buf = list->data;
+    view->len = list->length * 8;
+    view->readonly = 0;
+    view->itemsize = 8;
+    view->format = (flags & PyBUF_FORMAT) ? (list->kind == NT_I64 ? "q" : "d") : NULL;
+    view->ndim = 1;
+    view->shape = (flags & PyBUF_ND) == PyBUF_ND ? &view->len : NULL;
+    view->strides = (flags & PyBUF_STRIDES) == PyBUF_STRIDES ? &view->itemsize : NULL;
+    view->suboffsets = NULL;
+    view->internal = NULL;
+    list->exports++;
+    return 0;
+}
+
+static void nt_list_releasebuffer(PyObject *self, Py_buffer *view) {
+    ((nt_List *)self)->exports--;
+}
+
 static PyObject *nt_list_repr(PyObject *self) {
     return nt_show(self, 0);
 }
@@ -643,6 +674,8 @@ static PySequenceMethods nt_list_sequence = {
     .sq_ass_item = nt_list_sq_ass_item,
     .sq_contains = nt_list_sq_contains,
 };
+
+static PyBufferProcs nt_list_buffer = {nt_list_getbuffer, nt_list_releasebuffer};
 
 static PyMethodDef nt_list_methods[] = {
     {"append", nt_list_py_append, METH_O, NULL},
@@ -657,6 +690,7 @@ static PyTypeObject nt_ListType = {
     .tp_dealloc = nt_list_dealloc,
     .tp_repr = nt_list_repr,
     .tp_as_sequence = &nt_list_sequence,
+    .tp_as_buffer = &nt_list_buffer,
     .tp_richcompare = nt_list_richcompare,
     .tp_iter = PySeqIter_New,
     .tp_methods = nt_list_methods,

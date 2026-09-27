@@ -1,0 +1,30 @@
+// requires: numpy
+// Libraries without stubs come in as Dyn. Everything python allows works on
+// Dyn; getting back into static types needs as! or as?.
+import py * as np from "numpy";
+
+fn main() {
+    let grid = np.arange(12).reshape(3, 4);     // grid: Dyn
+    print(grid[1:, ::2]);                       // python slicing
+    print((grid @ grid.T).shape);               // matmul operator
+    print(np.mean(grid, axis = 0));             // named argument
+
+    let total = grid.sum() as! Int;             // numpy.int64 -> Int through __index__
+    print(total + 1);
+
+    let as_text = grid.dtype as? Str;           // a dtype is not a str
+    print(as_text);
+
+    // Nicethon lists go to python by reference. numpy wraps the native
+    // double buffer without copying (buffer protocol), so writes are shared.
+    let samples: List<Float> = [1.0, 2.0, 3.0];
+    let view = np.asarray(samples);
+    view[0] = 10.0;
+    print(samples);
+    print(view.shape);
+    try {
+        view[7] = 1.0;
+    } catch (error) {
+        print(error.type_name);
+    }
+}
