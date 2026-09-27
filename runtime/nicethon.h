@@ -977,6 +977,144 @@ static int64_t nt_big_to_i64(PyObject *value) {
     return result;
 }
 
+// Coroutines: an async function compiles to a resumable body function.
+
+typedef PyObject *(*nt_Resume)(void *frame, PyObject *sent, int *yielded);
+
+typedef struct {
+    PyObject_HEAD
+    nt_Resume resume;
+    void (*clear)(void *frame);
+    void *frame;
+    int done;
+} nt_Coroutine;
+
+static PyTypeObject nt_CoroutineType;
+
+static PyObject *nt_coroutine_new(nt_Resume resume, void (*clear)(void *), void *frame) {
+    nt_Coroutine *coroutine = PyObject_New(nt_Coroutine, &nt_CoroutineType);
+    if (!coroutine) {
+        clear(frame);
+        PyMem_Free(frame);
+        return NULL;
+    }
+    coroutine->resume = resume;
+    coroutine->clear = clear;
+    coroutine->frame = frame;
+    coroutine->done = 0;
+    return (PyObject *)coroutine;
+}
+
+static PySendResult nt_coroutine_am_send(PyObject *self, PyObject *sent, PyObject **result) {
+    nt_Coroutine *coroutine = (nt_Coroutine *)self;
+    if (coroutine->done) {
+        PyErr_SetString(PyExc_RuntimeError, "cannot reuse already awaited coroutine");
+        *result = NULL;
+        return PYGEN_ERROR;
+    }
+    int yielded = 0;
+    PyObject *value = coroutine->resume(coroutine->frame, sent ? sent : Py_None, &yielded);
+    if (yielded) {
+        *result = value;
+        return PYGEN_NEXT;
+    }
+    coroutine->done = 1;
+    *result = value;
+    return value ? PYGEN_RETURN : PYGEN_ERROR;
+}
+
+static PyObject *nt_coroutine_send(PyObject *self, PyObject *sent) {
+    PyObject *result;
+    PySendResult status = nt_coroutine_am_send(self, sent, &result);
+    if (status == PYGEN_RETURN) {
+        if (result == Py_None) PyErr_SetNone(PyExc_StopIteration);
+        else {
+            PyObject *stop = PyObject_CallOneArg(PyExc_StopIteration, result);
+            if (stop) {
+                PyErr_SetObject(PyExc_StopIteration, stop);
+                Py_DECREF(stop);
+            }
+        }
+        Py_DECREF(result);
+        return NULL;
+    }
+    return result;
+}
+
+static PyObject *nt_coroutine_next(PyObject *self) {
+    return nt_coroutine_send(self, Py_None);
+}
+
+static PyObject *nt_coroutine_throw(PyObject *self, PyObject *const *args, Py_ssize_t nargs) {
+    nt_Coroutine *coroutine = (nt_Coroutine *)self;
+    coroutine->done = 1;
+    if (nargs > 0) nt_throw(args[nargs > 1 ? 1 : 0] != Py_None ? args[nargs > 1 ? 1 : 0] : args[0]);
+    return NULL;
+}
+
+static PyObject *nt_coroutine_close(PyObject *self, PyObject *unused) {
+    ((nt_Coroutine *)self)->done = 1;
+    Py_RETURN_NONE;
+}
+
+static PyObject *nt_coroutine_await(PyObject *self) {
+    return Py_NewRef(self);
+}
+
+static void nt_coroutine_dealloc(PyObject *self) {
+    nt_Coroutine *coroutine = (nt_Coroutine *)self;
+    coroutine->clear(coroutine->frame);
+    PyMem_Free(coroutine->frame);
+    PyObject_Free(self);
+}
+
+static PyAsyncMethods nt_coroutine_async = {.am_await = nt_coroutine_await, .am_send = nt_coroutine_am_send};
+
+static PyMethodDef nt_coroutine_methods[] = {
+    {"send", nt_coroutine_send, METH_O, NULL},
+    {"throw", (PyCFunction)(void (*)(void))nt_coroutine_throw, METH_FASTCALL, NULL},
+    {"close", nt_coroutine_close, METH_NOARGS, NULL},
+    {"__await__", (PyCFunction)(void (*)(void))nt_coroutine_await, METH_NOARGS, NULL},
+    {NULL, NULL, 0, NULL},
+};
+
+static PyTypeObject nt_CoroutineType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "nicethon.Coroutine",
+    .tp_basicsize = sizeof(nt_Coroutine),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_dealloc = nt_coroutine_dealloc,
+    .tp_as_async = &nt_coroutine_async,
+    .tp_iter = nt_coroutine_await,
+    .tp_iternext = nt_coroutine_next,
+    .tp_methods = nt_coroutine_methods,
+};
+
+// Awaiting drives the awaited object's iterator one step per resume.
+// Returns 1 when it yielded, 0 when it finished (both set *result), -1 on error.
+static int nt_await_step(PyObject **iterator, PyObject *awaitable, PyObject *sent, PyObject **result) {
+    if (!*iterator) {
+        unaryfunc await = Py_TYPE(awaitable)->tp_as_async ? Py_TYPE(awaitable)->tp_as_async->am_await : NULL;
+        if (!await) {
+            PyErr_Format(PyExc_TypeError, "object %s can't be used in 'await' expression", Py_TYPE(awaitable)->tp_name);
+            return -1;
+        }
+        *iterator = await(awaitable);
+        if (!*iterator) return -1;
+        sent = Py_None;
+    }
+    PySendResult status = PyIter_Send(*iterator, sent, result);
+    if (status == PYGEN_ERROR) {
+        Py_CLEAR(*iterator);
+        return -1;
+    }
+    if (status == PYGEN_RETURN) {
+        Py_CLEAR(*iterator);
+        return 0;
+    }
+    return 1;
+}
+
 // Intrinsics declared in the prelude:
 
 static int nt_print(PyObject *value) {

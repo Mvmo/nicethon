@@ -1,0 +1,25 @@
+// Context managers and async functions use python's protocols, so python
+// libraries (io, asyncio) work with them directly.
+import py * as io from "io";
+import py * as asyncio from "asyncio";
+
+async fn delayed_double(value: Int) -> Int {
+    await asyncio.sleep(0);
+    value * 2
+}
+
+async fn double_all(limit: Int) -> List<Int> {
+    let results: List<Int> = [];        // let fixes the binding, the list can still grow
+    for value in 1..=limit {
+        results.push(await delayed_double(value));
+    }
+    results
+}
+
+fn main() {
+    with io.StringIO() as buffer {
+        buffer.write("written inside with");
+        print(buffer.getvalue());
+    }
+    print(asyncio.run(double_all(3)));  // double_all(3) is a Coroutine<List<Int>>
+}

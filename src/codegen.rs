@@ -869,6 +869,76 @@ impl<'a> Gen<'a> {
         }
     }
 
+    // Async functions: all variables live in a heap frame, so the body can
+    // return at an await and later jump back to it through a switch.
+
+    fn coroutine(&mut self, func: Func, header: String, bind_params: impl FnOnce(&mut Self)) {
+        let p = self.p;
+        let (index, module, def) = (func.body.unwrap(), func.module, func.instance);
+        let body = &p.fns[index];
+        let name = p.defs[body.def].name.clone();
+        let saved = std::mem::take(&mut self.f);
+        let Ret::Native(ret) = func.ret.clone() else { unreachable!() };
+        self.f = Func { error: "error".into(), ret: Ret::Boxed(ret), ..func };
+        for (local, info) in body.locals.iter().enumerate() {
+            if info.owner == 0 {
+                self.declare_local(local);
+            }
+        }
+        bind_params(self);
+        let param_code = std::mem::take(&mut self.f.out);
+        let value = self.expr(&body.body);
+        if !matches!(self.resolve(&body.body.ty), Ty::Never) {
+            self.emit_return(Some((value, body.body.ty.clone())));
+        }
+        let vars = std::mem::take(&mut self.f.vars);
+        let awaits = self.f.awaits;
+        let mut frame = String::from("typedef struct {\n    int state;\n");
+        let mut defines = String::new();
+        let mut undefines = String::new();
+        let mut clear = String::new();
+        for (var, repr) in &vars {
+            writeln!(frame, "    {} {var};", c_type(*repr)).unwrap();
+            writeln!(defines, "#define {var} (frame->{var})").unwrap();
+            writeln!(undefines, "#undef {var}").unwrap();
+            if repr.owned() {
+                writeln!(clear, "    Py_CLEAR(frame->{var});").unwrap();
+            }
+        }
+        writeln!(frame, "}} FR{def};\n").unwrap();
+        let mut text = frame;
+        writeln!(text, "static void C{def}(void *pointer) {{\n    FR{def} *frame = pointer;\n{clear}}}\n").unwrap();
+        text.push_str(&defines);
+        writeln!(text, "static PyObject *A{def}(void *pointer, PyObject *sent, int *yielded) {{\n    FR{def} *frame = pointer;\n    int nt_lineno = 0;\n    PyObject *ret = NULL;").unwrap();
+        text.push_str("    switch (frame->state) {\n    case 0: break;\n");
+        for resume in 1..=awaits {
+            writeln!(text, "    case {resume}: goto resume_{resume};").unwrap();
+        }
+        text.push_str("    default: PyErr_SetString(PyExc_RuntimeError, \"coroutine already finished\"); return NULL;\n    }\n");
+        text.push_str(&self.f.out);
+        write!(text, "done:\n    frame->state = -1;\n    return ret;\nerror:\n    nt_traceback({}, {}, nt_lineno);\n    frame->state = -1;\n    Py_XDECREF(ret);\n    return NULL;\n}}\n\n", c_string(&name), c_string(&self.names[module])).unwrap();
+        writeln!(text, "{header} {{\n    FR{def} *frame = PyMem_Calloc(1, sizeof(FR{def}));\n    int nt_lineno = 0;\n    if (!frame) return PyErr_NoMemory();\n{param_code}    return nt_coroutine_new(A{def}, C{def}, frame);\nerror:\n    C{def}(frame);\n    PyMem_Free(frame);\n    return NULL;\n}}").unwrap();
+        text.push_str(&undefines);
+        text.push('\n');
+        self.code.push_str(&text);
+        self.f = saved;
+    }
+
+    fn await_value(&mut self, value: &str) -> String {
+        self.f.awaits += 1;
+        let resume = self.f.awaits;
+        let iterator = self.temp(Repr::Obj);
+        let result = self.temp(Repr::Obj);
+        let step = self.temp(Repr::Unit);
+        self.emit(format!("frame->state = {resume};"));
+        self.emit(format!("resume_{resume}:"));
+        self.emit(format!("{step} = nt_await_step(&{iterator}, {value}, sent, &{result});"));
+        self.check(&format!("{step} < 0"));
+        self.emit(format!("if ({step} == 1) {{ *yielded = 1; ret = {result}; {result} = NULL; return ret; }}"));
+        self.emit("frame->state = 0;");
+        result
+    }
+
     // Statements:
 
     fn stmt(&mut self, expr: &Expr) {
