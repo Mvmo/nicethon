@@ -722,6 +722,35 @@ impl Checker {
     }
 }
 
+impl Checker {
+    // The trait's type arguments for a type that implements it, e.g. [Int] for
+    // ListIter<Int> and Iterator. None when the type does not implement it.
+    pub fn trait_args_for(&mut self, ty: &Ty, trait_def: DefId) -> Option<Vec<Ty>> {
+        let ty = self.shallow(ty);
+        let count = match self.defs[trait_def].kind {
+            DefKind::Trait { generics, .. } => generics,
+            _ => 0,
+        };
+        match &ty {
+            Ty::Var(_) | Ty::Error | Ty::Never => return Some((0..count).map(|_| self.fresh()).collect()),
+            Ty::Param(index) => {
+                let bound = self.f.bounds.get(*index as usize).and_then(|b| b.iter().find(|(t, _)| *t == trait_def));
+                if let Some((_, args)) = bound {
+                    return Some(args.clone());
+                }
+            }
+            _ => {}
+        }
+        if count == 0 && self.implements(&ty, trait_def) {
+            return Some(vec![]);
+        }
+        let imp = self.impls.iter().find(|imp| imp.trait_def == Some(trait_def) && same_head(&imp.target, &ty))?.clone();
+        let fresh: Vec<Ty> = (0..imp.generics).map(|_| self.fresh()).collect();
+        self.unify(&imp.target.subst(&fresh), &ty);
+        Some(imp.trait_args.iter().map(|arg| arg.subst(&fresh)).collect())
+    }
+}
+
 pub fn same_head(a: &Ty, b: &Ty) -> bool {
     match (a, b) {
         (Ty::Named(x, _), Ty::Named(y, _)) => x == y,

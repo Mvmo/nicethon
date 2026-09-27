@@ -1,0 +1,134 @@
+// Scenario: generic data structures, recursion through generic enums,
+// trait calls inside generic code, function composition.
+enum Tree<T> {
+    Leaf,
+    Node(left: Tree<T>, value: T, right: Tree<T>),
+}
+
+fn insert<T: Ord>(tree: Tree<T>, value: T) -> Tree<T> {
+    match tree {
+        Leaf => Tree.Node(Tree.Leaf, value, Tree.Leaf),
+        Node(left, current, right) => {
+            if value < current {
+                Tree.Node(insert(left, value), current, right)
+            } else {
+                Tree.Node(left, current, insert(right, value))
+            }
+        }
+    }
+}
+
+fn in_order<T>(tree: Tree<T>, into: List<T>) {
+    match tree {
+        Leaf => {}
+        Node(left, value, right) => {
+            in_order(left, into);
+            into.push(value);
+            in_order(right, into);
+        }
+    }
+}
+
+fn depth<T>(tree: Tree<T>) -> Int {
+    match tree {
+        Leaf => 0,
+        Node(left, _, right) => 1 + depth(left).max(depth(right)),
+    }
+}
+
+struct Stack<T> {
+    items: List<T>;
+}
+
+impl<T> Stack<T> {
+    fn new() -> Stack<T> {
+        Stack(items = [])
+    }
+
+    fn push(self, item: T) {
+        self.items.push(item);
+    }
+
+    fn pop(self) -> Option<T> {
+        self.items.pop()
+    }
+
+    fn peek(self) -> Option<T> {
+        self.items.get(self.items.len() - 1)
+    }
+}
+
+trait Shape {
+    fn area(self) -> Float;
+    fn name(self) -> Str {
+        "shape"
+    }
+}
+
+struct Square {
+    side: Float;
+}
+
+struct Circle {
+    radius: Float;
+}
+
+impl Shape for Square {
+    fn area(self) -> Float {
+        self.side * self.side
+    }
+
+    fn name(self) -> Str {
+        "square"
+    }
+}
+
+impl Shape for Circle {
+    fn area(self) -> Float {
+        3.0 * self.radius * self.radius
+    }
+}
+
+fn report<T: Shape>(shapes: List<T>) -> Str {
+    let total = shapes.fold(0.0, (sum, shape) => sum + shape.area());
+    `${shapes.len()} ${shapes[0].name()}s, area ${total}`
+}
+
+fn compose<A, B, C>(first: (A) -> B, second: (B) -> C) -> (A) -> C {
+    value => second(first(value))
+}
+
+fn main() {
+    var numbers: Tree<Int> = Tree.Leaf;
+    for value in [50, 30, 70, 20, 40, 60, 80, 35] {
+        numbers = insert(numbers, value);
+    }
+    let sorted: List<Int> = [];
+    in_order(numbers, sorted);
+    print(sorted);
+    print(depth(numbers));
+
+    var words: Tree<Str> = Tree.Leaf;
+    for word in ["pear", "apple", "fig"] {
+        words = insert(words, word);
+    }
+    let ordered: List<Str> = [];
+    in_order(words, ordered);
+    print(ordered);
+
+    let stack: Stack<Float> = Stack.new();
+    stack.push(1.5);
+    stack.push(2.5);
+    print(stack.peek());
+    print(stack.pop());
+    print(stack.pop());
+    print(stack.pop());
+
+    print(report([Square(2.0), Square(3.0)]));
+    print(report([Circle(1.0)]));
+
+    let shout = compose((text: Str) => text.upper(), text => `${text}!`);
+    let measure = compose(shout, text => text.len());
+    print(shout("hey"));
+    print(measure("hey"));
+}
