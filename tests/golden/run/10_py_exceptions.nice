@@ -1,0 +1,42 @@
+// Python exceptions: try/catch/finally, throw, and "try expr", which turns
+// an exception into Result<T, PyErr> for functional code.
+import py { ValueError, KeyError } from "builtins";
+import py * as json from "json";
+
+fn parse_config(text: Str) -> Result<Dyn, PyErr> {
+    try json.loads(text)                // typeshed: loads returns Any, so Dyn
+}
+
+fn checked_port(port: Int) -> Int {
+    if port < 1 || port > 65535 {
+        throw ValueError(`port out of range: ${port}`);
+    }
+    port
+}
+
+fn main() {
+    try {
+        checked_port(70000);
+        print("not reached");
+    } catch (error: ValueError) {
+        print(`caught: ${error.message}`);
+    } finally {
+        print("finally runs");
+    }
+
+    let table = json.loads("{\"a\": 1}");
+    try {
+        print(table["b"]);
+    } catch (error: KeyError | ValueError) {
+        print(`missing key ${error.message}`);
+    }
+
+    match parse_config("{\"port\": 8080}") {
+        Ok(config) => print(config["port"]),
+        Err(error) => print(`bad config: ${error.message}`),
+    }
+    match parse_config("{oops") {
+        Ok(config) => print(config),
+        Err(error) => print(`bad config: ${error.type_name}`),
+    }
+}

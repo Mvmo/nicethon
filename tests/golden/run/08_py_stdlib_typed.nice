@@ -1,0 +1,24 @@
+// The python stdlib through typeshed stubs: calls are typed, no casts needed.
+// Return values still get a cheap runtime check, because python does not
+// enforce its own annotations.
+import py { sqrt, floor, gcd } from "math";
+import py * as statistics from "statistics";
+import py * as textwrap from "textwrap";
+
+fn main() {
+    let root: Float = sqrt(2.0);
+    print(root);
+    print(floor(7.9) + 1);              // typeshed: floor returns int, so this is Int
+    print(gcd(84, 36));
+
+    let samples = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
+    print(statistics.mean(samples));    // the list goes to python by reference
+    print(statistics.pstdev(samples));
+
+    // list[str] comes back as List<Str>: copied, every element checked
+    let lines = textwrap.wrap("Nicethon calls Python directly", width = 12);
+    for line in lines {
+        print(line);
+    }
+    print(lines.len());
+}
