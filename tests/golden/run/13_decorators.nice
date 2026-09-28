@@ -1,0 +1,14 @@
+// Python decorators on Nicethon functions. The name is bound to whatever the
+// decorator returns. typeshed says functools.cache keeps the return type,
+// so fibonacci(80) is still an Int. Recursive calls go through the cache.
+import py { cache } from "functools";
+
+@cache
+fn fibonacci(index: Int) -> Int {
+    if index < 2 { index } else { fibonacci(index - 1) + fibonacci(index - 2) }
+}
+
+fn main() {
+    print(fibonacci(80));
+    print(fibonacci.cache_info());
+}

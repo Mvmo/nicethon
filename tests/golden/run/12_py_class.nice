@@ -1,0 +1,33 @@
+// Subclassing a python class, needed for APIs built on inheritance
+// (torch.nn.Module, unittest.TestCase, html.parser). self has the class
+// type: declared fields are typed, inherited attributes come from the stubs
+// or are Dyn.
+import py { HTMLParser } from "html.parser";
+
+py class LinkCollector : HTMLParser {
+    links: List<Str>;
+
+    fn __init__(self) {
+        super.__init__();
+        self.links = [];
+    }
+
+    // python calls this; attrs is converted and checked on every call
+    fn handle_starttag(self, tag: Str, attrs: List<(Str, Option<Str>)>) {
+        if tag != "a" {
+            return;
+        }
+        for (name, value) in attrs {
+            match (name, value) {
+                ("href", Some(link)) => self.links.push(link),
+                _ => {}
+            }
+        }
+    }
+}
+
+fn main() {
+    let parser = LinkCollector();
+    parser.feed("<p><a href=\"/docs\">Docs</a> and <a href=\"/blog\">Blog</a></p>");
+    print(parser.links);
+}

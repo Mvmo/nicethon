@@ -1,0 +1,5 @@
+[0 1 4 9]
+[1 2 3]
+TypeError: argument 'text': expected Str, found numpy.int64
+24
+["fig", "pear", "banana"]
