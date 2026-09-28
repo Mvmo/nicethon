@@ -1,0 +1,22 @@
+// match must cover every possible value. Guards do not count as cover.
+enum Light {
+    Red,
+    Yellow,
+    Green,
+}
+
+fn next(light: Light) -> Light {
+    match light {                               //~ error: non-exhaustive match: Green not covered
+        Red => Light.Green,
+        Yellow => Light.Red,
+    }
+}
+
+fn describe(value: Option<Int>) -> Str {
+    match value {                               //~ error: non-exhaustive match: None not covered
+        Some(number) if number > 0 => "positive",
+        Some(_) => "other",
+    }
+}
+
+fn main() {}

@@ -1,0 +1,19 @@
+// requires: numpy
+// No truthiness: conditions must be Bool. Catches numpy's
+// "truth value of an array is ambiguous" at compile time.
+import py * as np from "numpy";
+
+fn main() {
+    let values = np.array([1, 2, 3]);
+    if values == 0 {                            //~ error: condition must be Bool, found Dyn
+        print("zero");
+    }
+    let names = ["ada"];
+    if names {                                  //~ error: condition must be Bool, found List<Str>
+        print("not empty");
+    }
+    var countdown = 3;
+    while countdown {                           //~ error: condition must be Bool, found Int
+        countdown -= 1;
+    }
+}

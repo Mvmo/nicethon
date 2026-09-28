@@ -1,0 +1,14 @@
+// let freezes value types completely, reference types only the binding.
+struct Point {
+    x: Float;
+    y: Float;
+}
+
+fn main() {
+    let count = 1;
+    count = 2;                                  //~ error: cannot assign to count, it is declared with let
+    let point = Point(1.0, 2.0);
+    point.x = 3.0;                              //~ error: cannot assign to point.x, point is declared with let
+    let names = ["ada"];
+    names.push("grace");                        // fine: List is a reference type
+}

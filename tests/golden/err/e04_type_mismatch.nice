@@ -1,0 +1,14 @@
+// No implicit conversions between static types.
+struct Point {
+    x: Float;
+    y: Float;
+}
+
+fn main() {
+    let count: Int = 1.5;                       //~ error: expected Int, found Float
+    let ratio: Float = count;                   //~ error: expected Float, found Int
+    let text = "a" + 1;                         //~ error: cannot apply + to Str and Int
+    let point = Point(x = 1.0);                 //~ error: missing argument y
+    print(1 == "1");                            //~ error: cannot compare Int and Str
+    "abc".shout();                              //~ error: Str has no method shout
+}

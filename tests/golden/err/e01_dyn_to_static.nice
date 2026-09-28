@@ -1,0 +1,15 @@
+// requires: numpy
+// Dyn never flows into a static type without as! or as?.
+import py * as np from "numpy";
+
+fn take_int(value: Int) -> Int {
+    value
+}
+
+fn main() {
+    let values = np.array([1.0, 2.0]);
+    let mean: Float = values.mean();            //~ error: expected Float, found Dyn
+    let checked: Float = values.mean() as! Float;
+    take_int(values.size);                      //~ error: expected Int, found Dyn
+    let pointless = 1 as! Int;                  //~ error: as! needs a Dyn operand
+}

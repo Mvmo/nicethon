@@ -1,0 +1,18 @@
+// "?" needs a matching return type and the same error type.
+fn parse(text: Str) -> Result<Int, Str> {
+    match text.parse_int() {
+        Some(value) => Ok(value),
+        None => Err("not a number"),
+    }
+}
+
+fn no_result() -> Int {
+    parse("1")?                                 //~ error: ? needs the enclosing function to return Result or Option
+}
+
+fn other_error() -> Result<Int, Int> {
+    parse("1")?;                                //~ error: ? cannot return error Str from a function returning Result<Int, Int>
+    Ok(1)
+}
+
+fn main() {}

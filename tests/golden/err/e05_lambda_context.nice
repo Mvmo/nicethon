@@ -1,0 +1,6 @@
+// Lambda parameter types come from the expected type or an annotation.
+fn main() {
+    let identity = value => value;              //~ error: cannot infer type of lambda parameter value
+    let increment = (value: Int) => value + 1;
+    print(increment(1));
+}
