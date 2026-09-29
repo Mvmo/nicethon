@@ -45,10 +45,23 @@ def error_test(path):
     return "\n".join(problems) or None
 
 
+def interop_test(directory):
+    with tempfile.TemporaryDirectory() as out:
+        for source in directory.glob("*.nice"):
+            build = subprocess.run([COMPILER, "build", source, "-o", out, "--python", PYTHON], capture_output=True, text=True)
+            if build.returncode != 0:
+                return build.stderr
+        env = dict(os.environ, PYTHONPATH=out)
+        result = subprocess.run([PYTHON, directory / "driver.py"], capture_output=True, text=True, env=env)
+    expected = (directory / "expected.out").read_text()
+    return None if result.stdout == expected else f"expected:\n{expected}\ngot:\n{result.stdout}\n{result.stderr}"
+
+
 def main():
     selected = sys.argv[1] if len(sys.argv) > 1 else ""
     tests = [(p, run_test) for p in sorted((GOLDEN / "run").glob("*.nice"))]
     tests += [(p, error_test) for p in sorted((GOLDEN / "err").glob("*.nice"))]
+    tests += [(p, interop_test) for p in sorted((GOLDEN / "interop").iterdir()) if p.is_dir()]
     failed = 0
     for path, check in tests:
         if selected not in path.name:

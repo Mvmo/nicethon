@@ -1,0 +1,19 @@
+// Exported items are visible to python. Exported functions get a checking
+// wrapper (like PyO3's #[pyfunction]); calls from Nicethon skip it.
+
+export struct Point {
+    x: Float;
+    y: Float;
+}
+
+export fn norm(point: Point) -> Float {
+    (point.x * point.x + point.y * point.y) ** 0.5
+}
+
+export fn scale_all(points: List<Point>, factor: Float) -> List<Point> {
+    points.map(point => Point(point.x * factor, point.y * factor))
+}
+
+fn not_exported() -> Int {
+    1
+}
