@@ -1,0 +1,9 @@
+// The parser recovers after an error and reports all of them. A missing ";"
+// is reported at the end of the token before it.
+fn main() {
+    let first = 1                               //~ error: expected ;
+    let second = 2;
+    print(first + second)                       //~ error: expected ;
+    let third = ;                               //~ error: expected expression
+    let fourth = 4;
+}
