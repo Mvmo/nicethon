@@ -100,3 +100,31 @@ output.
 | Generics | Monomorphized: every generic function and type gets its own C code per concrete type. `largest<Int>` compares `int64_t` values, `Option<Int>` stores an `int64_t`, trait calls on type parameters are direct C calls. |
 | Python types | `lib/bindings.nice` declares types for a part of the stdlib. Other modules are `Dyn`. |
 | Compiler | Rust, no dependencies. Prelude, bindings and C runtime are embedded in the binary. |
+
+## How it works
+
+```
+ main.nice
+     |
+ lexer, parser       src/lexer.rs, src/parser.rs  (error recovery: all syntax errors at once)
+     |
+ type checker        src/check.rs, src/expr.rs    (bidirectional inference, exhaustiveness,
+     |                                             Dyn rules, produces typed IR in src/hir.rs)
+ C codegen           src/codegen.rs               (one copy per generic instance, unboxed values,
+     |                                             refcounting, boundary checks)
+     |
+ clang / gcc  ->  main.cpython-314-darwin.so  ->  imported by CPython
+```
+
+The generated C includes [runtime/nicethon.h](runtime/nicethon.h): records,
+the native list type, boundary checks, coroutines and the intrinsics of the
+[prelude](lib/prelude.nice). Python tracebacks point to `.nice` lines.
+
+## Limits
+
+- No LSP or formatter yet.
+- Python libraries are only typed through `lib/bindings.nice`; there is no
+  typeshed import yet.
+- Reference cycles through Nicethon lists are not collected.
+- `build` produces one extension module, no wheel. Tested on macOS only.
+- Free-threaded CPython builds are not supported.
