@@ -1,0 +1,73 @@
+// requires: numpy
+// Trait impls for builtin types, unit fields, defaults, keyword spreads,
+// numpy indexing and the in operator.
+import py * as builtins from "builtins";
+import py * as np from "numpy";
+
+trait Describe {
+    fn describe(self) -> Str;
+}
+
+impl Describe for Int {
+    fn describe(self) -> Str {
+        `int ${self}`
+    }
+}
+
+impl Describe for Str {
+    fn describe(self) -> Str {
+        `str ${self}`
+    }
+}
+
+fn describe_all<T: Describe>(items: List<T>) -> List<Str> {
+    items.map(item => item.describe())
+}
+
+struct Flags {
+    enabled: Bool;
+    count: Int;
+    nothing: ();
+}
+
+export fn greet(name: Str, punctuation: Str = "!", times: Int = 1) -> Str {
+    var text = "";
+    for _ in 0..times {
+        text = text + `Hello ${name}${punctuation}`;
+    }
+    text
+}
+
+
+fn main() {
+    print(describe_all([1, 2]));
+    print(describe_all(["a"]));
+    let flags = Flags(enabled = true, count = 3, nothing = ());
+    print(flags);
+    print(flags.enabled && flags.count > 2);
+    print(greet("Ada"));
+    print(greet("Ada", times = 2, punctuation = "?"));
+    let kwargs: Map<Str, Dyn> = ["sep": "-" as Dyn];
+    builtins.print("a", "b", **kwargs);
+    var matrix = np.zeros([2, 2]);
+    matrix[0, 1] = 5;
+    matrix += 1;
+    print(matrix);
+    print(matrix[..., 1]);
+    let values: List<Float> = [1.5, 2.5];
+    print(np.sum(values) as! Float);
+    let numbers: List<Int> = [1, 2, 3];
+    print(np.asarray(numbers).dtype);
+    let text = "abc";
+    for character in text {
+        print(character);
+    }
+    print(1.0 / 0.0);
+    print(10 / 4);
+    let nested = [[1, 2], [3]];
+    print(nested[0][1] + nested[1][0]);
+    let empty: List<Str> = [];
+    print(empty.is_empty());
+    print(3 in [1, 2, 3]);
+    print("b" in "abc");
+}

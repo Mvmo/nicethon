@@ -1,0 +1,176 @@
+// Everything the earlier tests do not cover: maps, BigInt, while let, loop
+// values, closures sharing a var, finally, Nicethon modules, spreads.
+import py * as builtins from "builtins";
+import py { ValueError } from "builtins";
+import { Vec2, length, Direction } from "./lib/shapes";
+import * as shapes from "./lib/shapes";
+
+trait Area {
+    fn area(self) -> Float;
+    fn describe(self) -> Str {
+        `area ${self.area()}`
+    }
+}
+
+struct Square {
+    side: Float;
+}
+
+impl Area for Square {
+    fn area(self) -> Float {
+        self.side * self.side
+    }
+
+    fn describe(self) -> Str {
+        "a square"
+    }
+}
+
+struct Box<T> {
+    value: T;
+}
+
+impl<T> Box<T> {
+    fn get(self) -> T {
+        self.value
+    }
+
+    fn map<U>(self, function: (T) -> U) -> Box<U> {
+        Box(value = function(self.value))
+    }
+}
+
+fn total_area<T: Area>(items: List<T>) -> Float {
+    items.fold(0.0, (sum, item) => sum + item.area())
+}
+
+fn with_finally() -> Int {
+    try {
+        return 1;
+    } finally {
+        print("finally before return");
+    }
+    2
+}
+
+fn adder(base: Int) -> (Int) -> Int {
+    value => base + value
+}
+
+fn counter_pair() -> (() -> Int, () -> Int) {
+    var count = 0;
+    let increment = () => {
+        count += 10;
+        count
+    };
+    let read = () => count;
+    (increment, read)
+}
+
+fn classify(value: Dyn) -> Str {
+    match value {
+        number: Int => `int ${number}`,
+        text: Str => `str ${text}`,
+        None => "none",
+        _ => "other",
+    }
+}
+
+fn first_two(items: List<Int>) -> Str {
+    match items {
+        [first, second, ..] => `${first} and ${second}`,
+        [only] => `only ${only}`,
+        _ => "empty",
+    }
+}
+
+fn main() {
+    let ages: Map<Str, Int> = ["ada": 36, "alan": 41];
+    ages["grace"] = 85;
+    print(ages["alan"]);
+    print(ages.get("bob"));
+    print(ages.len());
+    print("ada" in ages);
+    for name in ages.keys().sorted() {
+        print(name);
+    }
+
+    let big: BigInt = 2;
+    var power = big;
+    for _ in 0..100 {
+        power = power * big;
+    }
+    print(power);
+
+    var stack = [1, 2, 3];
+    while let Some(top) = stack.pop() {
+        print(top);
+    }
+
+    var index = 0;
+    let found = loop {
+        index += 1;
+        if index * index > 50 {
+            break index;
+        }
+    };
+    print(found);
+
+    print(with_finally());
+    let add_five = adder(5);
+    print(add_five(3));
+    let (increment, read) = counter_pair();
+    increment();
+    increment();
+    print(read());
+
+    print(total_area([Square(2.0), Square(3.0)]));
+    print(Square(1.0).describe());
+    let boxed = Box(value = 21).map(value => value * 2);
+    print(boxed.get());
+    print(boxed);
+
+    print(classify(builtins.int("7")));
+    print(classify(builtins.str("hi")));
+    print(classify(builtins.list()));
+    print(first_two([4, 5, 6]));
+    print(first_two([9]));
+
+    let point = Vec2(3.0, 4.0);
+    print(length(point));
+    print(shapes.length(Vec2(6.0, 8.0)));
+    print(Direction.North);
+
+    let pairs = [(1, "one"), (2, "two")];
+    for (number, word) in pairs {
+        print(`${number}=${word}`);
+    }
+    let maybe = builtins.int("12") as? Int;
+    print(maybe);
+    print(builtins.max(*[3, 9, 4]));
+    let text = "Hello World";
+    print(text.lower().split(" "));
+    print(text.replace("World", "Nicethon"));
+    print([1, 2] + [3]);
+    print((1, "a", true));
+    print(-7.5 ~/ 2.0);
+    print(2 ** 10);
+    print(7 % -3);
+
+    try {
+        throw ValueError("custom");
+    } catch (error: ValueError) {
+        print(error);
+    }
+    let result = try builtins.int("x");
+    print(result.is_err());
+
+    var numbers = [5, 3, 8];
+    numbers[1] = 30;
+    print(numbers);
+    print(numbers.get(10));
+    print(numbers.any(n => n > 20));
+    print([3, 1, 2].sorted().reversed());
+    print(["a", "b"].join("-"));
+    print(str(3.5) + "!");
+}

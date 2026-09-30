@@ -1,0 +1,13 @@
+export struct Vec2 {
+    x: Float;
+    y: Float;
+}
+
+export fn length(vector: Vec2) -> Float {
+    (vector.x * vector.x + vector.y * vector.y).sqrt()
+}
+
+export enum Direction {
+    North,
+    South,
+}

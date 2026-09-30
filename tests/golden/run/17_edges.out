@@ -1,0 +1,21 @@
+["int 1", "int 2"]
+["str a"]
+Flags(enabled = true, count = 3, nothing = ())
+true
+Hello Ada!
+Hello Ada?Hello Ada?
+a-b
+[[1. 6.]
+ [1. 1.]]
+[6. 1.]
+4.0
+int64
+a
+b
+c
+inf
+2.5
+5
+true
+true
+true
