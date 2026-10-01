@@ -287,6 +287,7 @@ impl<'a> Gen<'a> {
         if let Some(&index) = self.instance_index.get(&key) {
             return index;
         }
+        self.check_depth(def, targs);
         self.instances.push(key.clone());
         self.instance_index.insert(key, self.instances.len() - 1);
         self.pending.push(self.instances.len() - 1);
@@ -298,6 +299,7 @@ impl<'a> Gen<'a> {
         if let Some(&index) = self.record_index.get(&key) {
             return index;
         }
+        self.check_depth(def, args);
         let index = self.records.len();
         self.records.push(key.clone());
         self.record_index.insert(key, index);
@@ -305,6 +307,19 @@ impl<'a> Gen<'a> {
             self.enum_id(parent, args);
         }
         index
+    }
+
+    // A generic function or type that uses itself with a bigger type, like
+    // fn nest<T>(value: T) { nest([value]) }, would need infinitely many copies.
+    fn check_depth(&self, def: DefId, args: &[Ty]) {
+        if args.iter().any(|ty| depth(ty) > 40) {
+            let owner = match self.p.defs[def].kind {
+                DefKind::Variant { parent, .. } => parent,
+                _ => def,
+            };
+            eprintln!("error: {} uses itself with an ever growing type, this cannot be compiled to separate copies per type", self.p.defs[owner].name);
+            std::process::exit(1);
+        }
     }
 
     fn enum_id(&mut self, def: DefId, args: &[Ty]) -> usize {
@@ -2174,4 +2189,15 @@ fn bind(pattern: &Ty, concrete: &Ty, bound: &mut [Option<Ty>]) -> bool {
         _ => return pattern == concrete,
     };
     pairs.into_iter().all(|(a, b)| bind(a, b, bound))
+}
+
+fn depth(ty: &Ty) -> usize {
+    let inner: Vec<&Ty> = match ty {
+        Ty::List(item) | Ty::Set(item) | Ty::Coroutine(item) => vec![item],
+        Ty::Map(key, value) => vec![key, value],
+        Ty::Tuple(items) | Ty::Named(_, items) => items.iter().collect(),
+        Ty::Fn(params, ret) => params.iter().chain([&**ret]).collect(),
+        _ => vec![],
+    };
+    1 + inner.into_iter().map(depth).max().unwrap_or(0)
 }

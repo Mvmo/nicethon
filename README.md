@@ -125,6 +125,9 @@ the native list type, boundary checks, coroutines and the intrinsics of the
 - No LSP or formatter yet.
 - Python libraries are only typed through `lib/bindings.nice`; there is no
   typeshed import yet.
+- A generic function that calls itself with an ever bigger type
+  (`fn nest<T>(value: T) { nest([value]) }`) cannot be compiled to one copy
+  per type and is rejected.
 - Reference cycles through Nicethon lists are not collected.
 - `build` produces one extension module, no wheel. Tested on macOS only.
 - Free-threaded CPython builds are not supported.

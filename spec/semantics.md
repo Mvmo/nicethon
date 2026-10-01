@@ -177,6 +177,9 @@ not observable: structs behave like values.
   compares `int64_t` values in C, `Pair<Int, Float>` stores an `int64_t`
   and a `double`. Only functions reachable from non-generic code are
   compiled.
+- A generic function or type that uses itself with an ever bigger type
+  argument (`fn nest<T>(value: T) { nest([value]) }`) would need infinitely
+  many copies and is rejected.
 - Traits are nominal: a type implements a trait only through
   `impl Trait for Type`, also for builtin types (`impl Describe for Int`).
   Traits may have default methods.
