@@ -40,6 +40,9 @@ compiler (default `cc`).
 that interpreter are the ones a program can import.
 
 Tests: `python3 tests/run.py` runs all golden tests (`tests/golden/`).
+`python3 tests/fuzz.py diff 100` compares random programs against a Python
+model of the same semantics, `python3 tests/fuzz.py syntax 300` mutates the
+test programs and checks that the compiler never crashes.
 
 ## Taste
 
