@@ -158,7 +158,7 @@ static PyTypeObject nt_ListType;
 
 typedef struct {
     PyObject_HEAD
-    Py_ssize_t length, capacity;
+    Py_ssize_t length, capacity, shape;
     int kind;
     int exports;
     PyTypeObject *item_type;
@@ -645,6 +645,8 @@ static int nt_list_getbuffer(PyObject *self, Py_buffer *view, int flags) {
         PyErr_SetString(PyExc_BufferError, "only lists of Int or Float expose a buffer");
         return -1;
     }
+    // The length cannot change while a view exists, so one shape serves all views.
+    list->shape = list->length;
     view->obj = Py_NewRef(self);
     view->buf = list->data;
     view->len = list->length * 8;
@@ -652,7 +654,7 @@ static int nt_list_getbuffer(PyObject *self, Py_buffer *view, int flags) {
     view->itemsize = 8;
     view->format = (flags & PyBUF_FORMAT) ? (list->kind == NT_I64 ? "q" : "d") : NULL;
     view->ndim = 1;
-    view->shape = (flags & PyBUF_ND) == PyBUF_ND ? &view->len : NULL;
+    view->shape = (flags & PyBUF_ND) == PyBUF_ND ? &list->shape : NULL;
     view->strides = (flags & PyBUF_STRIDES) == PyBUF_STRIDES ? &view->itemsize : NULL;
     view->suboffsets = NULL;
     view->internal = NULL;
