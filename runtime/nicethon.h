@@ -964,6 +964,36 @@ static int nt_pow_i64(int64_t base, int64_t exponent, int64_t *out) {
     return 0;
 }
 
+// Same algorithm as CPython's float divmod, so ~/ and % match Python exactly,
+// signed zeros included. Division by zero gives nan instead of raising.
+static double nt_divmod_f64(double left, double right, double *rest) {
+    *rest = fmod(left, right);
+    double quotient = (left - *rest) / right;
+    if (*rest) {
+        if ((right < 0) != (*rest < 0)) {
+            *rest += right;
+            quotient -= 1.0;
+        }
+    } else {
+        *rest = copysign(0.0, right);
+    }
+    if (!quotient) return copysign(0.0, left / right);
+    double floored = floor(quotient);
+    return quotient - floored > 0.5 ? floored + 1.0 : floored;
+}
+
+static double nt_mod_f64(double left, double right) {
+    double rest;
+    nt_divmod_f64(left, right, &rest);
+    return right == 0 ? NAN : rest;
+}
+
+static double nt_floordiv_f64(double left, double right) {
+    double rest;
+    double quotient = nt_divmod_f64(left, right, &rest);
+    return right == 0 ? NAN : quotient;
+}
+
 static int nt_float_to_int(double value, int64_t *out) {
     if (!(value > -9223372036854775809.0 && value < 9223372036854775808.0)) return nt_panic_text("Float out of range for Int");
     *out = (int64_t)value;
