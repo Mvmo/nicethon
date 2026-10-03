@@ -1,0 +1,8 @@
+// When nothing says what type a value has, the checker asks for an annotation.
+fn main() {
+    print([].map(value => value + value));      //~ error: cannot infer the type of these operands
+    let unknown = -sum([]);                     //~ error: cannot infer the type of this value
+    let fine: Int = -sum([]);
+    let also_fine = [] as List<Int>;
+    print(also_fine.map(value => value + value));
+}

@@ -76,6 +76,38 @@ impl Checker {
         value
     }
 
+    // Uses the expected type to fill in type variables, if it fits.
+    fn hint(&mut self, ty: &Ty, expected: Option<&Ty>) {
+        let Some(expected) = expected else { return };
+        let informative = !matches!(self.shallow(expected), Ty::Var(_) | Ty::Dyn | Ty::Unit | Ty::Error | Ty::Never);
+        if informative && self.has_vars(ty) && self.compatible(ty, expected) {
+            self.unify(ty, expected);
+        }
+    }
+
+    fn has_vars(&self, ty: &Ty) -> bool {
+        let mut found = false;
+        self.deep(ty).map(&mut |ty| {
+            found |= matches!(ty, Ty::Var(_));
+            None
+        });
+        found
+    }
+
+    // Like unify, but only checks and never binds.
+    fn compatible(&self, left: &Ty, right: &Ty) -> bool {
+        let all = |a: &[Ty], b: &[Ty]| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.compatible(x, y));
+        match (self.shallow(left), self.shallow(right)) {
+            (Ty::Var(_), _) | (_, Ty::Var(_)) | (Ty::Error, _) | (_, Ty::Error) => true,
+            (Ty::List(a), Ty::List(b)) | (Ty::Set(a), Ty::Set(b)) | (Ty::Coroutine(a), Ty::Coroutine(b)) => self.compatible(&a, &b),
+            (Ty::Map(a, b), Ty::Map(c, d)) => self.compatible(&a, &c) && self.compatible(&b, &d),
+            (Ty::Tuple(a), Ty::Tuple(b)) => all(&a, &b),
+            (Ty::Fn(a, r), Ty::Fn(b, s)) => all(&a, &b) && self.compatible(&r, &s),
+            (Ty::Named(a, x), Ty::Named(b, y)) => a == b && all(&x, &y),
+            (a, b) => a == b,
+        }
+    }
+
     pub fn dynamic(&mut self, value: Expr) -> Expr {
         if matches!(self.shallow(&value.ty), Ty::Dyn | Ty::Error) {
             return value;
