@@ -1,0 +1,7 @@
+tests run: 3, failures: 1
+data from a
+data from b
+data from c
+caught: cannot fetch broken
+panic through python sorted: integer division by zero
+[-1, 2, 3]

@@ -1,0 +1,96 @@
+// Scenario: read a CSV file, parse rows into structs with proper error
+// handling, aggregate per category and print a sorted report.
+import py * as tempfile from "tempfile";
+import py * as os from "os";
+import py { open } from "builtins";
+
+struct Sale {
+    category: Str;
+    item: Str;
+    amount: Float;
+    quantity: Int;
+}
+
+enum ParseError {
+    WrongColumnCount(line: Int, found: Int),
+    BadNumber(line: Int, text: Str),
+}
+
+fn parse_line(number: Int, line: Str) -> Result<Sale, ParseError> {
+    let columns = line.split(",");
+    if columns.len() != 4 {
+        return Err(ParseError.WrongColumnCount(number, columns.len()));
+    }
+    let amount = match columns[2].trim().parse_float() {
+        Some(value) => value,
+        None => return Err(ParseError.BadNumber(number, columns[2])),
+    };
+    let quantity = match columns[3].trim().parse_int() {
+        Some(value) => value,
+        None => return Err(ParseError.BadNumber(number, columns[3])),
+    };
+    Ok(Sale(columns[0].trim(), columns[1].trim(), amount, quantity))
+}
+
+fn parse_all(lines: List<Str>) -> Result<List<Sale>, ParseError> {
+    let sales: List<Sale> = [];
+    var number = 0;
+    for line in lines {
+        number += 1;
+        if number == 1 || line.trim().is_empty() {
+            continue;
+        }
+        sales.push(parse_line(number, line)?);
+    }
+    Ok(sales)
+}
+
+fn read_lines(path: Str) -> List<Str> {
+    with open(path, encoding = "utf-8") as file {
+        let text = file.read() as! Str;
+        return text.split("\n");
+    }
+}
+
+fn write_file(directory: Dyn, name: Str, text: Str) -> Str {
+    let path = os.path.join(directory, name) as! Str;
+    with open(path, "w") as file {
+        file.write(text);
+    }
+    path
+}
+
+fn report(sales: List<Sale>) {
+    let totals: Map<Str, Float> = [:];
+    let counts: Map<Str, Int> = [:];
+    for sale in sales {
+        let revenue = sale.amount * sale.quantity as Float;
+        totals[sale.category] = totals.get(sale.category).unwrap_or(0.0) + revenue;
+        counts[sale.category] = counts.get(sale.category).unwrap_or(0) + sale.quantity;
+    }
+    let categories = totals.keys().sort_by(category => -totals[category]);
+    for category in categories {
+        print(`${category}: ${counts[category]} items, revenue ${totals[category]}`);
+    }
+    let best = sales.fold(sales[0], (best, sale) => if sale.amount > best.amount { sale } else { best });
+    print(`most expensive item: ${best.item} (${best.amount})`);
+}
+
+fn run(path: Str) {
+    match parse_all(read_lines(path)) {
+        Ok(sales) => report(sales),
+        Err(WrongColumnCount(line, found)) => print(`line ${line}: expected 4 columns, found ${found}`),
+        Err(BadNumber(line, text)) => print(`line ${line}: not a number: ${text}`),
+    }
+}
+
+fn main() {
+    with tempfile.TemporaryDirectory() as directory {
+        let good = write_file(directory, "sales.csv", "category,item,amount,quantity\nfruit,apple,0.5,10\nfruit,mango,2.25,4\ntools,hammer,12.0,1\n\ntools,nails,0.05,200\nbooks,atlas,30.0,2\n");
+        run(good);
+        let broken = write_file(directory, "broken.csv", "category,item,amount,quantity\nfruit,apple,cheap,10\n");
+        run(broken);
+        let short = write_file(directory, "short.csv", "category,item,amount,quantity\nfruit,apple\n");
+        run(short);
+    }
+}

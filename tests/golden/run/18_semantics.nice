@@ -1,0 +1,39 @@
+// Regressions found by tests/fuzz.py: float ~/ and % follow Python exactly
+// (signed zeros included), expected types flow into calls and operators,
+// and as fills in a type that is still open.
+import py * as io from "io";
+
+fn first_word(text: Str) -> Str {
+    with io.StringIO(text) as stream {
+        return stream.read().split(" ")[0];
+    }
+}
+
+fn main() {
+    print(-4.0 % 2.0);
+    print(4.0 % -2.0);
+    print(-0.0 ~/ 1.0);
+    print(0.0 ~/ -1.0);
+    print(-7.5 ~/ 2.0);
+    print(7.5 % -2.0);
+    print(1.0 % 0.0);
+    print(5.0 ~/ 0.0);
+
+    let total: Int = -sum([]);
+    print(total);
+    print(sum([]) as Float);
+    let empty = [] as List<Str>;
+    print(empty.len());
+    let scaled: List<Float> = [1, 2].map(value => value as Float * 1.5);
+    print(scaled);
+
+    print(first_word("hello nested world"));
+
+    let pair: (Option<Int>, Bool) = (Some(3), false);
+    let described = match pair {
+        (Some(number), true) => `some ${number} and true`,
+        (Some(number), false) => `some ${number} and false`,
+        (None, _) => "none",
+    };
+    print(described);
+}

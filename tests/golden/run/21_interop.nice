@@ -1,0 +1,71 @@
+// Scenario: Python frameworks and errors crossing the boundary.
+import py * as unittest from "unittest";
+import py * as asyncio from "asyncio";
+import py * as io from "io";
+import py { sorted, ValueError } from "builtins";
+import py { Panic } from "_nicethon";
+
+fn parse_port(text: Str) -> Int {
+    match text.parse_int() {
+        Some(port) if port > 0 && port < 65536 => port,
+        _ => throw ValueError(`bad port: ${text}`),
+    }
+}
+
+py class PortTests : unittest.TestCase {
+    fn test_valid(self) {
+        self.assertEqual(parse_port("8080"), 8080);
+    }
+
+    fn test_invalid(self) {
+        with self.assertRaises(ValueError) {
+            parse_port("70000");
+        }
+    }
+
+    fn test_failing_on_purpose(self) {
+        self.assertEqual(parse_port("1"), 2);
+    }
+}
+
+async fn fetch(name: Str, delay: Float) -> Str {
+    await asyncio.sleep(delay);
+    if name == "broken" {
+        throw ValueError(`cannot fetch ${name}`);
+    }
+    `data from ${name}`
+}
+
+async fn fetch_all() -> List<Str> {
+    let results = await asyncio.gather(fetch("a", 0.02), fetch("b", 0.01), fetch("c", 0.0));
+    let collected: List<Str> = [];
+    for result in results {
+        collected.push(result as! Str);
+    }
+    try {
+        await fetch("broken", 0.0);
+    } catch (error: ValueError) {
+        collected.push(`caught: ${error.message}`);
+    }
+    collected
+}
+
+fn main() {
+    let stream = io.StringIO();
+    let runner = unittest.TextTestRunner(stream = stream, verbosity = 0);
+    let result = runner.run(unittest.defaultTestLoader.loadTestsFromTestCase(PortTests));
+    print(`tests run: ${result.testsRun}, failures: ${(result.failures as! List<Dyn>).len()}`);
+
+    for line in asyncio.run(fetch_all()) {
+        print(line);
+    }
+
+    try {
+        sorted([3, 1, 2], key = (value: Int) => 10 ~/ (value - 2));
+    } catch (error: Panic) {
+        print(`panic through python sorted: ${error.message}`);
+    }
+
+    let squares = sorted([3, -1, 2], key = (value: Int) => value * value);
+    print(squares);
+}
