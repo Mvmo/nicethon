@@ -905,6 +905,67 @@ static int nt_args(PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames, c
     return 0;
 }
 
+// Functions and closures: Python calls them through entry, Nicethon calls
+// native directly, a C function with unboxed parameters after the captures.
+typedef PyObject *(*nt_Entry)(PyObject *, PyObject *const *, Py_ssize_t, PyObject *);
+
+typedef struct {
+    PyObject_HEAD
+    vectorcallfunc vectorcall;
+    nt_Entry entry;
+    void *native;
+    PyObject *captures;
+    const char *name;
+} nt_Closure;
+
+static PyTypeObject nt_ClosureType;
+
+#define NT_NATIVE(function) (Py_IS_TYPE(function, &nt_ClosureType) ? ((nt_Closure *)(function))->native : NULL)
+
+static PyObject *nt_closure_vectorcall(PyObject *self, PyObject *const *args, size_t nargsf, PyObject *kwnames) {
+    nt_Closure *closure = (nt_Closure *)self;
+    return closure->entry(closure->captures, args, PyVectorcall_NARGS(nargsf), kwnames);
+}
+
+static void nt_closure_dealloc(PyObject *self) {
+    Py_XDECREF(((nt_Closure *)self)->captures);
+    PyObject_Free(self);
+}
+
+static PyObject *nt_closure_repr(PyObject *self) {
+    return PyUnicode_FromFormat("<function %s>", ((nt_Closure *)self)->name);
+}
+
+static PyTypeObject nt_ClosureType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "nicethon.Function",
+    .tp_basicsize = sizeof(nt_Closure),
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_VECTORCALL,
+    .tp_vectorcall_offset = offsetof(nt_Closure, vectorcall),
+    .tp_call = PyVectorcall_Call,
+    .tp_dealloc = nt_closure_dealloc,
+    .tp_repr = nt_closure_repr,
+};
+
+static PyObject *nt_closure_new(nt_Entry entry, void *native, PyObject *captures, const char *name) {
+    nt_Closure *closure = PyObject_New(nt_Closure, &nt_ClosureType);
+    if (!closure) return NULL;
+    closure->vectorcall = nt_closure_vectorcall;
+    closure->entry = entry;
+    closure->native = native;
+    closure->captures = Py_XNewRef(captures);
+    closure->name = name;
+    return (PyObject *)closure;
+}
+
+static PyObject *nt_call_spread(PyObject *function, PyObject *positional, PyObject *keywords) {
+    PyObject *tuple = PySequence_Tuple(positional);
+    if (!tuple) return NULL;
+    PyObject *result = PyObject_Call(function, tuple, keywords);
+    Py_DECREF(tuple);
+    return result;
+}
+
 // Exceptions:
 
 static int nt_throw(PyObject *value) {

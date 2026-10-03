@@ -708,6 +708,20 @@ impl<'a> Gen<'a> {
         self.wrapper(instance);
     }
 
+    // The parameter and return types of a lambda in this instance, concrete.
+    fn lambda_types(&self, instance: usize, lambda: usize) -> (Vec<Ty>, Ty) {
+        let (def, targs) = &self.instances[instance];
+        let body = &self.p.fns[self.bodies[def]];
+        let info = &body.lambdas[lambda];
+        let concrete = |ty: &Ty| self.p.resolve(ty).subst(targs);
+        (info.params.iter().map(|&param| concrete(&body.locals[param].ty)).collect(), concrete(&info.ret))
+    }
+
+    fn native_signature(&self, name: &str, params: &[Ty], ret: &Ty) -> String {
+        let params: String = params.iter().enumerate().map(|(i, ty)| format!(", {} a{i}", c_type(self.repr_of(ty)))).collect();
+        format!("static {} {name}(PyObject *self{params})", c_type(self.repr_of(ret)))
+    }
+
     // Every lambda becomes a native function N (captures, unboxed arguments)
     // and an entry L that Python calls with boxed arguments.
     fn lambda(&mut self, instance: usize, lambda: usize) {
