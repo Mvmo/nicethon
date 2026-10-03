@@ -1,0 +1,36 @@
+// Exhaustiveness looks into nested patterns and names a value that no arm matches.
+enum Tree {
+    Leaf,
+    Node(left: Tree, value: Int, right: Tree),
+}
+
+fn pairs(a: Bool, b: Bool) -> Int {
+    match (a, b) {                              //~ error: non-exhaustive match: (false, false) not covered
+        (true, _) => 1,
+        (false, true) => 2,
+    }
+}
+
+fn nested(value: Option<Option<Int>>) -> Int {
+    match value {                               //~ error: non-exhaustive match: Some(None) not covered
+        Some(Some(number)) => number,
+        None => 0,
+    }
+}
+
+fn shallow(tree: Tree) -> Int {
+    match tree {                                //~ error: non-exhaustive match: Node(Node(
+        Leaf => 0,
+        Node(Leaf, value, _) => value,
+    }
+}
+
+fn complete(value: Result<Option<Int>, Str>) -> Int {
+    match value {
+        Ok(Some(number)) => number,
+        Ok(None) => 0,
+        Err(_) => -1,
+    }
+}
+
+fn main() {}
