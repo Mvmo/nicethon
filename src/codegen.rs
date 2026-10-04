@@ -667,6 +667,7 @@ impl<'a> Gen<'a> {
             Some((ParamKind::SelfParam, Ty::Float)) => "Float_",
             Some((ParamKind::SelfParam, Ty::Int)) => "Int_",
             Some((ParamKind::SelfParam, Ty::Map(..))) => "Map_",
+            Some((ParamKind::SelfParam, Ty::Named(..))) => "Cell_",
             _ => "",
         };
         format!("nt_{owner}{}", self.p.defs[def].name)
@@ -849,6 +850,23 @@ impl<'a> Gen<'a> {
     fn call_intrinsic(&mut self, def: DefId, args: &[Expr], raw: &[String], ty: &Ty) -> String {
         let sig = self.p.sig(def);
         let symbol = self.intrinsic_symbol(def);
+        // Cell.get and Cell.set read and write the record field in place.
+        if symbol == "nt_Cell_get" || symbol == "nt_Cell_set" {
+            let cell = self.p.defs.iter().position(|d| d.module == 0 && d.name == "Cell").unwrap();
+            if symbol == "nt_Cell_get" {
+                return self.field(&raw[0], cell, 0, &args[0].ty, ty);
+            }
+            let cell_args = self.owner_args(&args[0].ty);
+            let record = self.record(cell, &cell_args);
+            let value = self.stored(&raw[1], &cell_args[0]);
+            let slot = format!("((S{record} *){})->f0", raw[0]);
+            match self.storage(&cell_args[0]) {
+                Repr::Obj => self.emit(format!("Py_SETREF({slot}, Py_NewRef({value}));")),
+                Repr::Unit => {}
+                _ => self.emit(format!("{slot} = {value};")),
+            }
+            return "0".into();
+        }
         let params: Vec<Ty> = sig.params.iter().map(|p| self.erased(&p.ty)).collect();
         // Pushing an unboxed Int or Float skips the boxed path.
         let call = match (symbol.as_str(), args.get(1).map(|arg| self.repr(&arg.ty))) {

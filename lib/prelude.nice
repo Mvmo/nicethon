@@ -241,3 +241,19 @@ impl<K, V> Map<K, V> {
         key in self
     }
 }
+
+// Cell: a mutable slot inside an immutable value, used for iterator state.
+// Copies of a value share its cells.
+
+struct Cell<T> {
+    value: T;
+}
+
+fn cell<T>(value: T) -> Cell<T> {
+    Cell(value = value)
+}
+
+impl<T> Cell<T> {
+    fn get(self) -> T;
+    fn set(self, value: T);
+}
