@@ -1,0 +1,67 @@
+// Iterators: a type only implements next, every lazy method works on it.
+// for loops accept any Iterator, lists have iter, zip and enumerate.
+struct Fibonacci {
+    current: Cell<Int>;
+    following: Cell<Int>;
+}
+
+fn fibonacci() -> Fibonacci {
+    Fibonacci(current = cell(0), following = cell(1))
+}
+
+impl Iterator<Int> for Fibonacci {
+    fn next(self) -> Option<Int> {
+        let value = self.current.get();
+        self.current.set(self.following.get());
+        self.following.set(value + self.following.get());
+        Some(value)
+    }
+}
+
+fn total<I: Iterator<Int>>(numbers: I) -> Int {
+    numbers.fold(0, (sum, value) => sum + value)
+}
+
+fn main() {
+    let names = ["ada", "alan", "grace"];
+    let years = [1815, 1912, 1906];
+
+    for (name, year) in names.zip(years) {
+        print(`${name} was born in ${year}`);
+    }
+    for (index, name) in names.enumerate() {
+        print(`${index}: ${name}`);
+    }
+
+    print(fibonacci().take(10).collect());
+    print(fibonacci().filter(value => value % 2 == 0).take(5).collect());
+    print(fibonacci().skip(5).map(value => `#${value}`).take(3).collect());
+    print(range(0, 5).chain(range(10, 13)).collect());
+    print(range(1, 101).fold(0, (sum, value) => sum + value));
+    print(total(range(0, 10).map(value => value * value)));
+    print(names.iter().count());
+    print(names.iter().any(name => name.starts_with("g")));
+    print(names.iter().all(name => name.len() > 3));
+    print(names.iter().find(name => name.len() == 4));
+    print(names.iter().find(name => name.len() == 9));
+    print(names.iter().zip(range(1, 100)).map(pair => pair.1).collect());
+    range(0, 3).for_each(value => print(value * 100));
+
+    let lazy = range(0, 1000000000).map(value => value * 2).filter(value => value % 3 == 0);
+    print(lazy.take(4).collect());
+
+    // Adapters pull lazily: only as many items as needed are computed.
+    var calls = 0;
+    let counted = range(0, 100).map(value => {
+        calls += 1;
+        value
+    });
+    print(counted.take(3).collect());
+    print(calls);
+
+    // zip stops at the shorter side without pulling the longer one further.
+    let left = range(0, 2);
+    let right = range(10, 20);
+    print(left.zip(right).collect());
+    print(right.next());
+}

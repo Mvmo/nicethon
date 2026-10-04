@@ -194,6 +194,41 @@ not observable: structs behave like values.
   from Python classes.
 - Type arguments are inferred; explicit form `parse<Int>(text)`.
 
+## 9a. Iterators
+
+`Iterator<T>` is a prelude trait. A type implements only `next`:
+
+```
+struct Fibonacci {
+    current: Cell<Int>;
+    following: Cell<Int>;
+}
+
+impl Iterator<Int> for Fibonacci {
+    fn next(self) -> Option<Int> {
+        let value = self.current.get();
+        self.current.set(self.following.get());
+        self.following.set(value + self.following.get());
+        Some(value)
+    }
+}
+```
+
+- Lazy adapters (default methods): `map`, `filter`, `zip`, `enumerate`,
+  `take`, `skip`, `chain`. They pull one item from their source per `next`,
+  so `range(0, 1000000000).map(f).take(3)` calls `f` three times.
+- Consumers: `collect`, `fold`, `count`, `any`, `all`, `find`, `for_each`.
+- `for pattern in iterator { }` works with every iterator.
+- `list.iter()`, `list.zip(other)`, `list.enumerate()` and `range(start, end)`
+  create iterators. `zip` behaves like Python's: it stops at the shorter side
+  and does not pull the longer one further.
+- `Cell<T>` (`cell(value)`, `get`, `set`) is a mutable slot inside an
+  immutable value, used for iterator state. Copies of a value share their
+  cells, so an iterator keeps its position when it is passed around.
+- Generic code takes iterators with a bound: `fn total<I: Iterator<Int>>(numbers: I) -> Int`.
+  Because generics are monomorphized, a chain like `iter().map(f).filter(g)`
+  compiles to direct C calls.
+
 ## 10. Errors
 
 ### 10.1 Own errors: Result and ?

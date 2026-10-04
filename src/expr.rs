@@ -772,11 +772,14 @@ impl Checker {
             Ty::Str => Ty::Str,
             Ty::Dyn | Ty::Error => Ty::Dyn,
             Ty::Named(def, _) if matches!(self.defs[def].kind, DefKind::ExternType { .. } | DefKind::PyClass { .. }) => Ty::Dyn,
-            other => {
-                let message = format!("cannot iterate over {}", self.show(&other));
-                self.error(iterable.pos, message);
-                Ty::Error
-            }
+            other => match self.trait_args_for(&other, self.builtins["Iterator"]) {
+                Some(args) => return self.iterator_loop(pattern, iterable, body, args[0].clone(), pos),
+                None => {
+                    let message = format!("cannot iterate over {}, it does not implement Iterator", self.show(&other));
+                    self.error(iterable.pos, message);
+                    Ty::Error
+                }
+            },
         };
         let iterable = if matches!(iterable.ty, Ty::Named(..)) { self.dynamic(iterable) } else { iterable };
         self.scoped(|this| {
@@ -788,6 +791,37 @@ impl Checker {
             let body = this.check_block(body, None);
             this.f.loops.pop();
             node(Ty::Unit, ExprKind::For(Box::new(pattern), boxed(iterable), boxed(body)), pos)
+        })
+    }
+
+    // for pattern in iterator { body } becomes
+    // { let it = iterator; loop { match it.next() { Some(pattern) => body, _ => break } } }
+    fn iterator_loop(&mut self, pattern: &ast::Pattern, iterable: Expr, body: &ast::Block, item: Ty, pos: Pos) -> Expr {
+        self.scoped(|this| {
+            let ty = iterable.ty.clone();
+            let local = this.declare_local(" iterator", ty.clone(), false);
+            let receiver = node(ty.clone(), ExprKind::Local(local), pos);
+            let Some(callee) = this.method_callee(receiver, "next", pos) else {
+                return node(Ty::Error, ExprKind::Unit, pos);
+            };
+            let next = this.apply(callee, &[], pos, Some(&this.builtin_ty("Option", vec![item])));
+            let some = ast::Pattern { kind: ast::PatKind::Ctor(vec!["Some".into()], vec![ast::SubPat::Pat(pattern.clone())]), pos };
+            this.f.loops.push(None);
+            let arm = this.scoped(|this| {
+                let checked = this.check_pattern(&some, &next.ty);
+                if let PatKind::Variant(_, fields) = &checked.kind {
+                    if !fields.iter().all(|(_, p)| this.irrefutable(p)) {
+                        this.error(pos, "for patterns must always match");
+                    }
+                }
+                Arm { pattern: checked, guard: None, body: this.check_block(body, None) }
+            });
+            this.f.loops.pop();
+            let done = Arm { pattern: Pattern { ty: next.ty.clone(), kind: PatKind::Wild }, guard: None, body: node(Ty::Never, ExprKind::Break(None), pos) };
+            let matcher = node(Ty::Unit, ExprKind::Match(boxed(next), vec![arm, done]), pos);
+            let looped = node(Ty::Unit, ExprKind::Loop(boxed(node(Ty::Unit, ExprKind::Block(vec![Stmt::Expr(matcher)], None), pos))), pos);
+            let bind = Stmt::Let(Pattern { ty, kind: PatKind::Bind(local) }, iterable);
+            node(Ty::Unit, ExprKind::Block(vec![bind], Some(boxed(looped))), pos)
         })
     }
 

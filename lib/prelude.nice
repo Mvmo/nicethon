@@ -122,6 +122,18 @@ fn fold<T, A>(items: List<T>, initial: A, function: (A, T) -> A) -> A {
 }
 
 impl<T> List<T> {
+    fn iter(self) -> ListIter<T> {
+        ListIter(items = self, position = cell(0))
+    }
+
+    fn zip<V>(self, other: List<V>) -> Zipped<ListIter<T>, ListIter<V>, T, V> {
+        self.iter().zip(other.iter())
+    }
+
+    fn enumerate(self) -> Enumerated<ListIter<T>, T> {
+        self.iter().enumerate()
+    }
+
     fn len(self) -> Int;
     fn push(self, item: T);
     fn pop(self) -> Option<T>;
@@ -257,3 +269,252 @@ impl<T> Cell<T> {
     fn get(self) -> T;
     fn set(self, value: T);
 }
+
+// Iterator: a type only provides next, all other methods build on it.
+// The adapters are lazy, they pull one item from their source per next.
+
+trait Iterator<T> {
+    fn next(self) -> Option<T>;
+
+    fn map<U>(self, function: (T) -> U) -> Mapped<Self, T, U> {
+        Mapped(source = self, function = function)
+    }
+
+    fn filter(self, keep: (T) -> Bool) -> Filtered<Self, T> {
+        Filtered(source = self, keep = keep)
+    }
+
+    fn zip<J: Iterator<V>, V>(self, other: J) -> Zipped<Self, J, T, V> {
+        Zipped(left = self, right = other)
+    }
+
+    fn enumerate(self) -> Enumerated<Self, T> {
+        Enumerated(source = self, index = cell(0))
+    }
+
+    fn take(self, count: Int) -> Taken<Self, T> {
+        Taken(source = self, remaining = cell(count))
+    }
+
+    fn skip(self, count: Int) -> Skipped<Self, T> {
+        Skipped(source = self, remaining = cell(count))
+    }
+
+    fn chain<J: Iterator<T>>(self, other: J) -> Chained<Self, J, T> {
+        Chained(first = self, second = other, first_done = cell(false))
+    }
+
+    fn collect(self) -> List<T> {
+        let result: List<T> = [];
+        for item in self {
+            result.push(item);
+        }
+        result
+    }
+
+    fn fold<A>(self, initial: A, function: (A, T) -> A) -> A {
+        var total = initial;
+        for item in self {
+            total = function(total, item);
+        }
+        total
+    }
+
+    fn count(self) -> Int {
+        var total = 0;
+        for _ in self {
+            total += 1;
+        }
+        total
+    }
+
+    fn any(self, check: (T) -> Bool) -> Bool {
+        for item in self {
+            if check(item) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn all(self, check: (T) -> Bool) -> Bool {
+        for item in self {
+            if !check(item) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn find(self, check: (T) -> Bool) -> Option<T> {
+        for item in self {
+            if check(item) {
+                return Some(item);
+            }
+        }
+        None
+    }
+
+    fn for_each(self, action: (T) -> ()) {
+        for item in self {
+            action(item);
+        }
+    }
+}
+
+struct ListIter<T> {
+    items: List<T>;
+    position: Cell<Int>;
+}
+
+impl<T> Iterator<T> for ListIter<T> {
+    fn next(self) -> Option<T> {
+        let position = self.position.get();
+        if position >= self.items.len() {
+            return None;
+        }
+        self.position.set(position + 1);
+        Some(self.items[position])
+    }
+}
+
+struct Counter {
+    current: Cell<Int>;
+    end: Int;
+}
+
+// Lazy range: range(0, 3) yields 0, 1, 2 without building a list.
+fn range(start: Int, end: Int) -> Counter {
+    Counter(current = cell(start), end = end)
+}
+
+impl Iterator<Int> for Counter {
+    fn next(self) -> Option<Int> {
+        let value = self.current.get();
+        if value >= self.end {
+            return None;
+        }
+        self.current.set(value + 1);
+        Some(value)
+    }
+}
+
+struct Mapped<I, T, U> {
+    source: I;
+    function: (T) -> U;
+}
+
+impl<I: Iterator<T>, T, U> Iterator<U> for Mapped<I, T, U> {
+    fn next(self) -> Option<U> {
+        match self.source.next() {
+            Some(value) => Some(self.function(value)),
+            None => None,
+        }
+    }
+}
+
+struct Filtered<I, T> {
+    source: I;
+    keep: (T) -> Bool;
+}
+
+impl<I: Iterator<T>, T> Iterator<T> for Filtered<I, T> {
+    fn next(self) -> Option<T> {
+        loop {
+            match self.source.next() {
+                Some(value) => {
+                    if self.keep(value) {
+                        return Some(value);
+                    }
+                }
+                None => return None,
+            }
+        }
+    }
+}
+
+struct Zipped<I, J, T, V> {
+    left: I;
+    right: J;
+}
+
+impl<I: Iterator<T>, J: Iterator<V>, T, V> Iterator<(T, V)> for Zipped<I, J, T, V> {
+    // Like Python's zip: the right side is only pulled when the left had an item.
+    fn next(self) -> Option<(T, V)> {
+        match self.left.next() {
+            Some(left) => match self.right.next() {
+                Some(right) => Some((left, right)),
+                None => None,
+            },
+            None => None,
+        }
+    }
+}
+
+struct Enumerated<I, T> {
+    source: I;
+    index: Cell<Int>;
+}
+
+impl<I: Iterator<T>, T> Iterator<(Int, T)> for Enumerated<I, T> {
+    fn next(self) -> Option<(Int, T)> {
+        match self.source.next() {
+            Some(value) => {
+                let index = self.index.get();
+                self.index.set(index + 1);
+                Some((index, value))
+            }
+            None => None,
+        }
+    }
+}
+
+struct Taken<I, T> {
+    source: I;
+    remaining: Cell<Int>;
+}
+
+impl<I: Iterator<T>, T> Iterator<T> for Taken<I, T> {
+    fn next(self) -> Option<T> {
+        let remaining = self.remaining.get();
+        if remaining <= 0 {
+            return None;
+        }
+        self.remaining.set(remaining - 1);
+        self.source.next()
+    }
+}
+
+struct Skipped<I, T> {
+    source: I;
+    remaining: Cell<Int>;
+}
+
+impl<I: Iterator<T>, T> Iterator<T> for Skipped<I, T> {
+    fn next(self) -> Option<T> {
+        while self.remaining.get() > 0 {
+            self.remaining.set(self.remaining.get() - 1);
+            self.source.next();
+        }
+        self.source.next()
+    }
+}
+
+struct Chained<I, J, T> {
+    first: I;
+    second: J;
+    first_done: Cell<Bool>;
+}
+
+impl<I: Iterator<T>, J: Iterator<T>, T> Iterator<T> for Chained<I, J, T> {
+    fn next(self) -> Option<T> {
+        if !self.first_done.get() {
+            match self.first.next() {
+                Some(value) => return Some(value),
+                None => self.first_done.set(true),
+            }
+        }
+        self.second.next()
+    }
+}
+
