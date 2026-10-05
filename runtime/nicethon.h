@@ -83,6 +83,14 @@ typedef struct {
     PyObject *value;
 } nt_Payload;
 
+// Unboxed Option values: tag 1 is Some, 0 is None, -1 marks an error.
+typedef struct { int64_t value; int tag; } nt_OptI64;
+typedef struct { double value; int tag; } nt_OptF64;
+typedef struct { int value; int tag; } nt_OptBool;
+typedef struct { PyObject_HEAD int64_t value; } nt_SomeI64;
+typedef struct { PyObject_HEAD double value; } nt_SomeF64;
+typedef struct { PyObject_HEAD int value; } nt_SomeBool;
+
 #define NT_FIELD(record, field) (*(PyObject **)((char *)(record) + (field)->offset))
 #define NT_RECORD(T) ((nt_RecordType *)Py_TYPE(T))
 

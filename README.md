@@ -100,7 +100,7 @@ output.
 | Containers at the boundary | Passed by reference. Nicethon lists are native objects. Python sees them as sequences, and numpy wraps `List<Int>` and `List<Float>` without copying (buffer protocol). |
 | Lambdas | Thick arrow: `value => value * 2`, `(left, right) => left + right`, block bodies allowed. Calls from Nicethon go straight to native C, Python sees a normal callable. |
 | Iterators | A type implements `Iterator<T>` with only `next`, and gets lazy `map`, `filter`, `zip`, `enumerate`, `take`, `skip`, `chain` plus `collect`, `fold`, `count`, `any`, `all`, `find`, `for_each`. `for` works on every iterator. |
-| Values | `Int`, `Float` and `Bool` are plain C values (`int64_t`, `double`, `int`). Structs and enum variants are immutable records with native fields. |
+| Values | `Int`, `Float` and `Bool` are plain C values (`int64_t`, `double`, `int`). `Option<T>` is unboxed too (a small struct, or a pointer that is NULL for `None`). Structs and enum variants are immutable records with native fields. |
 | Generics | Monomorphized: every generic function and type gets its own C code per concrete type. `largest<Int>` compares `int64_t` values, `Option<Int>` stores an `int64_t`, trait calls on type parameters are direct C calls. |
 | Python types | `lib/bindings.nice` declares types for a part of the stdlib. Other modules are `Dyn`. |
 | Compiler | Rust, no dependencies. Prelude, bindings and C runtime are embedded in the binary. |
@@ -117,6 +117,7 @@ against the same program in plain Python:
 | Recursive fibonacci(32) | 0.28 s | 0.010 s | 27x |
 | Create 5M structs and use their fields | 1.73 s | 0.084 s | 21x |
 | Generic `swap(Pair<A, B>)`, 5M calls | 2.67 s | 0.17 s | 16x |
+| `range(0, 10M).map(..).filter(..).fold(..)` against a generator | 0.66 s | 0.094 s | 7x |
 
 Code that mostly calls numpy or other libraries is about as fast as Python,
 because the time is spent inside the library.

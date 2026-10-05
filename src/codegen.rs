@@ -446,6 +446,38 @@ impl<'a> Gen<'a> {
         if self.repr(ty).is_option() { self.box_value(value, ty) } else { value.to_string() }
     }
 
+    // Some(payload) or None, payload in the representation of T.
+    fn option_value(&mut self, option_ty: &Ty, payload: Option<&str>) -> String {
+        let args = self.owner_args(option_ty);
+        match (self.repr(option_ty), payload) {
+            (Repr::OptObj, Some(value)) => value.to_string(),
+            (Repr::OptObj, None) => "NULL".into(),
+            (repr, Some(value)) if repr.is_option() => format!("(({}){{{value}, 1}})", c_type(repr)),
+            (repr, None) if repr.is_option() => zero(repr).into(),
+            (_, Some(value)) => self.make_record(self.some, &args, &[value.to_string()]),
+            (_, None) => self.make_record(self.none, &args, &[]),
+        }
+    }
+
+    // payload is a boxed value or NULL for None.
+    fn make_option(&mut self, payload: &str, option_ty: &Ty) -> String {
+        let repr = self.repr(option_ty);
+        if repr == Repr::OptObj {
+            return payload.to_string();
+        }
+        let inner = self.owner_args(option_ty)[0].clone();
+        let result = self.temp(repr);
+        self.emit(format!("if ({payload}) {{"));
+        let value = self.unbox(payload, self.repr(&inner));
+        let some = self.option_value(option_ty, Some(&value));
+        self.assign(&result, &some, repr);
+        self.emit("} else {");
+        let none = self.option_value(option_ty, None);
+        self.assign(&result, &none, repr);
+        self.emit("}");
+        result
+    }
+
     // Boxing between representations:
 
     fn box_value(&mut self, value: &str, ty: &Ty) -> String {

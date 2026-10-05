@@ -35,12 +35,20 @@ pub enum Repr {
     Bool,
     Unit,
     Obj,
+    OptI64,
+    OptF64,
+    OptBool,
+    OptObj,
 }
 
 impl Repr {
     // Holds a reference that must be released (OptObj may also be NULL).
     pub fn owned(self) -> bool {
         matches!(self, Repr::Obj | Repr::OptObj)
+    }
+
+    pub fn is_option(self) -> bool {
+        matches!(self, Repr::OptI64 | Repr::OptF64 | Repr::OptBool | Repr::OptObj)
     }
 }
 
