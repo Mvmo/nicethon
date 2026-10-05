@@ -105,6 +105,22 @@ output.
 | Python types | `lib/bindings.nice` declares types for a part of the stdlib. Other modules are `Dyn`. |
 | Compiler | Rust, no dependencies. Prelude, bindings and C runtime are embedded in the binary. |
 
+## Performance
+
+Measured on an Apple Silicon Mac with CPython 3.14, `nicethon run --release`
+against the same program in plain Python:
+
+| Benchmark | Python | Nicethon | Speedup |
+|---|---|---|---|
+| Integer loop, 50M iterations | 2.84 s | 0.085 s | 33x |
+| Build and sum a `List<Float>` of 5M | 0.36 s | 0.020 s | 18x |
+| Recursive fibonacci(32) | 0.28 s | 0.010 s | 27x |
+| Create 5M structs and use their fields | 1.73 s | 0.084 s | 21x |
+| Generic `swap(Pair<A, B>)`, 5M calls | 2.67 s | 0.17 s | 16x |
+
+Code that mostly calls numpy or other libraries is about as fast as Python,
+because the time is spent inside the library.
+
 ## How it works
 
 ```
