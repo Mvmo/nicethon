@@ -1,0 +1,87 @@
+// Conway's Game of Life on a board that wraps around at the edges.
+// Board is an immutable value; step builds the next generation. The cell
+// loops only touch Int and Bool, so they compile to plain C.
+import py { perf_counter } from "time";
+
+struct Board {
+    width: Int;
+    height: Int;
+    cells: List<Bool>;
+}
+
+impl Board {
+    fn empty(width: Int, height: Int) -> Board {
+        Board(width, height, range(0, width * height).map(_ => false).collect())
+    }
+
+    fn with_alive(self, points: List<(Int, Int)>) -> Board {
+        let cells = self.cells.map(alive => alive);
+        for (x, y) in points {
+            cells[y * self.width + x] = true;
+        }
+        self.copy(cells = cells)
+    }
+
+    fn alive(self, x: Int, y: Int) -> Bool {
+        let column = (x + self.width) % self.width;
+        let row = (y + self.height) % self.height;
+        self.cells[row * self.width + column]
+    }
+
+    fn neighbours(self, x: Int, y: Int) -> Int {
+        var count = 0;
+        for dy in -1..2 {
+            for dx in -1..2 {
+                if (dx != 0 || dy != 0) && self.alive(x + dx, y + dy) {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    fn step(self) -> Board {
+        let next: List<Bool> = [];
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let count = self.neighbours(x, y);
+                next.push(count == 3 || (count == 2 && self.alive(x, y)));
+            }
+        }
+        self.copy(cells = next)
+    }
+
+    fn render(self) -> Str {
+        let rows: List<Str> = [];
+        for y in 0..self.height {
+            rows.push(range(0, self.width).map(x => if self.alive(x, y) { "#" } else { "." }).collect().join(""));
+        }
+        rows.join("\n")
+    }
+}
+
+fn main() {
+    var board = Board.empty(10, 6).with_alive([(1, 0), (2, 1), (0, 2), (1, 2), (2, 2), (6, 3), (7, 3), (8, 3)]);
+    for generation in 0..4 {
+        print(`generation ${generation}:`);
+        print(board.render());
+        board = board.step();
+    }
+
+    // A simple linear congruential generator scatters 4000 starting cells.
+    var seed = 12345;
+    let points: List<(Int, Int)> = [];
+    for _ in 0..4000 {
+        seed = (seed * 1103515245 + 12345) % 2147483648;
+        let x = seed ~/ 65536 % 128;
+        seed = (seed * 1103515245 + 12345) % 2147483648;
+        points.push((x, seed ~/ 65536 % 128));
+    }
+    var big = Board.empty(128, 128).with_alive(points);
+    let start = perf_counter();
+    for _ in 0..200 {
+        big = big.step();
+    }
+    let alive = big.cells.iter().filter(cell => cell).count();
+    print(`128 x 128 board, 200 generations: ${alive} cells alive, ${((perf_counter() - start) * 1000.0) as Int} ms`);
+}
