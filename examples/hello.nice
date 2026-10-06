@@ -1,0 +1,5 @@
+// Run with: nicethon run examples/hello.nice
+fn main() {
+    let language = "Nicethon";
+    print(`Hello from ${language}!`);
+}

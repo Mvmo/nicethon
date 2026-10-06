@@ -1,0 +1,107 @@
+// A small bank ledger: enums with data, Result and ? for errors that are
+// part of the domain, and a trait for readable output.
+
+enum Transaction {
+    Deposit(account: Str, amount: Int),
+    Withdraw(account: Str, amount: Int),
+    Transfer(source: Str, target: Str, amount: Int),
+}
+
+enum BankError {
+    UnknownAccount(name: Str),
+    InsufficientFunds(name: Str, balance: Int, needed: Int),
+    InvalidAmount(amount: Int),
+}
+
+trait Describe {
+    fn describe(self) -> Str;
+}
+
+impl Describe for Transaction {
+    fn describe(self) -> Str {
+        match self {
+            Deposit(account, amount) => `deposit ${amount} to ${account}`,
+            Withdraw(account, amount) => `withdraw ${amount} from ${account}`,
+            Transfer(source, target, amount) => `transfer ${amount} from ${source} to ${target}`,
+        }
+    }
+}
+
+impl Describe for BankError {
+    fn describe(self) -> Str {
+        match self {
+            UnknownAccount(name) => `there is no account ${name}`,
+            InsufficientFunds(name, balance, needed) => `${name} has ${balance}, needs ${needed}`,
+            InvalidAmount(amount) => `${amount} is not a valid amount`,
+        }
+    }
+}
+
+struct Bank {
+    balances: Map<Str, Int>;
+}
+
+fn check_amount(amount: Int) -> Result<(), BankError> {
+    if amount <= 0 { Err(BankError.InvalidAmount(amount)) } else { Ok(()) }
+}
+
+impl Bank {
+    fn balance(self, name: Str) -> Result<Int, BankError> {
+        match self.balances.get(name) {
+            Some(balance) => Ok(balance),
+            None => Err(BankError.UnknownAccount(name)),
+        }
+    }
+
+    fn change(self, name: Str, delta: Int) -> Result<(), BankError> {
+        let current = self.balance(name)?;
+        if current + delta < 0 {
+            return Err(BankError.InsufficientFunds(name, current, -delta));
+        }
+        self.balances[name] = current + delta;
+        Ok(())
+    }
+
+    fn apply(self, transaction: Transaction) -> Result<(), BankError> {
+        match transaction {
+            Deposit(account, amount) => {
+                check_amount(amount)?;
+                self.change(account, amount)
+            }
+            Withdraw(account, amount) => {
+                check_amount(amount)?;
+                self.change(account, -amount)
+            }
+            Transfer(source, target, amount) => {
+                check_amount(amount)?;
+                self.balance(target)?;
+                self.change(source, -amount)?;
+                self.change(target, amount)
+            }
+        }
+    }
+}
+
+fn main() {
+    let bank = Bank(balances = ["alice": 100, "bob": 50]);
+
+    let transactions = [
+        Transaction.Deposit("alice", 25),
+        Transaction.Transfer("alice", "bob", 80),
+        Transaction.Withdraw("bob", 200),
+        Transaction.Transfer("bob", "carol", 10),
+        Transaction.Deposit("bob", -5),
+        Transaction.Withdraw("bob", 130),
+    ];
+
+    for transaction in transactions {
+        match bank.apply(transaction) {
+            Ok(_) => print(`ok    ${transaction.describe()}`),
+            Err(error) => print(`fail  ${transaction.describe()}: ${error.describe()}`),
+        }
+    }
+
+    for name in bank.balances.keys().sorted() {
+        print(`${name}: ${bank.balances[name]}`);
+    }
+}
