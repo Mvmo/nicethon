@@ -679,6 +679,11 @@ impl Checker {
                         let index = self.coerce(index, &key);
                         node(*item, ExprKind::Index(boxed(target), boxed(index)), pos)
                     }
+                    (Ty::Str, [ast::IndexArg::Expr(index)]) => {
+                        let index = self.check_expr(index, Some(&Ty::Int));
+                        let index = self.coerce(index, &Ty::Int);
+                        node(Ty::Str, ExprKind::Index(boxed(target), boxed(index)), pos)
+                    }
                     (Ty::Dyn | Ty::Error, _) | (Ty::Named(..), _) => {
                         let target = self.dynamic(target);
                         let parts = self.index_parts(args);

@@ -1303,6 +1303,7 @@ impl<'a> Gen<'a> {
                         let value = self.call(Repr::Obj, format!("nt_map_get({object}, {key})"));
                         self.unbox(&value, repr)
                     }
+                    Ty::Str => self.call(Repr::Obj, format!("nt_str_get({object}, {index_value})")),
                     _ => self.list_get(&object, &index_value, &ty),
                 }
             }

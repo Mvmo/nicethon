@@ -1422,6 +1422,16 @@ static PyObject *nt_Map_values(PyObject *self) {
     return list;
 }
 
+static PyObject *nt_str_get(PyObject *text, int64_t index) {
+    Py_ssize_t length = PyUnicode_GetLength(text);
+    if (index < 0) index += length;
+    if (index < 0 || index >= length) {
+        PyErr_Format(nt_panic_type, "index %lld out of range for length %zd", (long long)index, length);
+        return NULL;
+    }
+    return PyUnicode_Substring(text, index, index + 1);
+}
+
 static PyObject *nt_map_get(PyObject *map, PyObject *key) {
     PyObject *value = PyDict_GetItemWithError(map, key);
     if (!value) {
