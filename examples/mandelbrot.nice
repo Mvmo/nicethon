@@ -1,0 +1,48 @@
+// The Mandelbrot set as ASCII art. Everything is Float and Int arithmetic,
+// so the inner loop runs as native C.
+import py { perf_counter } from "time";
+
+const PALETTE: Str = " .:-=+*#%@";
+
+fn escape_time(real: Float, imaginary: Float, limit: Int) -> Int {
+    var x = 0.0;
+    var y = 0.0;
+    var step = 0;
+    while step < limit && x * x + y * y <= 4.0 {
+        let next_x = x * x - y * y + real;
+        y = 2.0 * x * y + imaginary;
+        x = next_x;
+        step += 1;
+    }
+    step
+}
+
+fn render(width: Int, height: Int, limit: Int) -> List<Str> {
+    let rows: List<Str> = [];
+    for row in 0..height {
+        let imaginary = -1.2 + 2.4 * row as Float / height as Float;
+        let line: List<Str> = [];
+        for column in 0..width {
+            let real = -2.1 + 3.0 * column as Float / width as Float;
+            let steps = escape_time(real, imaginary, limit);
+            let shade = if steps == limit { 0 } else { 1 + steps % 9 };
+            line.push(PALETTE[shade]);
+        }
+        rows.push(line.join(""));
+    }
+    rows
+}
+
+fn main() {
+    for row in render(72, 28, 200) {
+        print(row);
+    }
+    let start = perf_counter();
+    var total = 0;
+    for row in 0..600 {
+        for column in 0..800 {
+            total += escape_time(-2.1 + 3.0 * column as Float / 800.0, -1.2 + 2.4 * row as Float / 600.0, 500);
+        }
+    }
+    print(`800 x 600 points, ${total} iterations in ${((perf_counter() - start) * 1000.0) as Int} ms`);
+}
