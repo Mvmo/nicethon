@@ -1,0 +1,40 @@
+// Counts the words of a text file, or of a built-in sample, and prints the
+// most frequent ones.
+// Run with: nicethon run examples/word_count.nice -- some_file.txt
+import py { argv } from "sys";
+import py { open } from "builtins";
+
+const SAMPLE: Str = "It was the best of times, it was the worst of times, it was the age of
+wisdom, it was the age of foolishness, it was the epoch of belief, it was
+the epoch of incredulity, it was the season of Light, it was the season of
+Darkness, it was the spring of hope, it was the winter of despair.";
+
+fn read_text() -> Str {
+    let arguments = argv as! List<Str>;
+    if arguments.len() < 2 {
+        return SAMPLE;
+    }
+    with open(arguments[1], encoding = "utf-8") as file {
+        return file.read() as! Str;
+    }
+}
+
+// Python's str methods are available on Dyn, so strip and split come from Python.
+fn words(text: Str) -> List<Str> {
+    let python_text: Dyn = text;
+    (python_text.lower().split() as! List<Str>)
+        .map(word => (word as Dyn).strip(".,;:!?\"'()") as! Str)
+        .filter(word => !word.is_empty())
+}
+
+fn main() {
+    let counts: Map<Str, Int> = [:];
+    for word in words(read_text()) {
+        counts[word] = counts.get(word).unwrap_or(0) + 1;
+    }
+    let ranked = counts.keys().sort_by(word => -counts[word]);
+    for (rank, word) in ranked.iter().take(5).enumerate() {
+        print(`${rank + 1}. ${word} (${counts[word]})`);
+    }
+    print(`${counts.len()} different words`);
+}

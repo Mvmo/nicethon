@@ -1,0 +1,100 @@
+// Custom iterators: a type only implements next and gets every lazy method.
+// Pairwise is a custom adapter that works on any iterator.
+
+struct Primes {
+    candidate: Cell<Int>;
+}
+
+fn primes() -> Primes {
+    Primes(candidate = cell(2))
+}
+
+fn is_prime(number: Int) -> Bool {
+    var divisor = 2;
+    while divisor * divisor <= number {
+        if number % divisor == 0 {
+            return false;
+        }
+        divisor += 1;
+    }
+    true
+}
+
+impl Iterator<Int> for Primes {
+    fn next(self) -> Option<Int> {
+        var number = self.candidate.get();
+        while !is_prime(number) {
+            number += 1;
+        }
+        self.candidate.set(number + 1);
+        Some(number)
+    }
+}
+
+struct Collatz {
+    current: Cell<Int>;
+    done: Cell<Bool>;
+}
+
+fn collatz(start: Int) -> Collatz {
+    Collatz(current = cell(start), done = cell(false))
+}
+
+impl Iterator<Int> for Collatz {
+    fn next(self) -> Option<Int> {
+        if self.done.get() {
+            return None;
+        }
+        let value = self.current.get();
+        if value == 1 {
+            self.done.set(true);
+        }
+        self.current.set(if value % 2 == 0 { value ~/ 2 } else { 3 * value + 1 });
+        Some(value)
+    }
+}
+
+struct Pairwise<I, T> {
+    source: I;
+    previous: Cell<Option<T>>;
+}
+
+fn pairwise<I: Iterator<T>, T>(source: I) -> Pairwise<I, T> {
+    Pairwise(source = source, previous = cell(None))
+}
+
+impl<I: Iterator<T>, T> Iterator<(T, T)> for Pairwise<I, T> {
+    fn next(self) -> Option<(T, T)> {
+        let previous = match self.previous.get() {
+            Some(value) => value,
+            None => match self.source.next() {
+                Some(value) => value,
+                None => return None,
+            },
+        };
+        match self.source.next() {
+            Some(current) => {
+                self.previous.set(Some(current));
+                Some((previous, current))
+            }
+            None => None,
+        }
+    }
+}
+
+fn main() {
+    print(`first primes: ${primes().take(10).collect()}`);
+    print(`10000th prime: ${primes().skip(9999).next().unwrap()}`);
+
+    let gaps = pairwise(primes()).map(pair => pair.1 - pair.0);
+    print(`gaps between primes: ${gaps.take(15).collect()}`);
+
+    let longest = range(1, 10000).map(start => (collatz(start).count(), start)).fold((0, 0), (best, next) => if next.0 > best.0 { next } else { best });
+    print(`longest Collatz chain below 10000 starts at ${longest.1} (${longest.0 - 1} steps)`);
+    print(`collatz(27) peaks at ${collatz(27).fold(0, (peak, value) => peak.max(value))}`);
+
+    let twin_primes = pairwise(primes()).filter(pair => pair.1 - pair.0 == 2).take(6);
+    for (smaller, larger) in twin_primes {
+        print(`twin primes ${smaller} and ${larger}`);
+    }
+}
