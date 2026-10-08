@@ -1,0 +1,36 @@
+// numpy does the heavy lifting on arrays (Dyn), typed Nicethon code builds a
+// histogram from the samples, and a typed list goes back to numpy without a copy.
+import py * as np from "numpy";
+
+fn histogram(values: List<Float>, low: Float, high: Float, buckets: Int) -> List<Int> {
+    let counts: List<Int> = range(0, buckets).map(_ => 0).collect();
+    let width = (high - low) / buckets as Float;
+    for value in values {
+        let index = ((value - low) / width).floor() as Int;
+        if index >= 0 && index < buckets {
+            counts[index] = counts[index] + 1;
+        }
+    }
+    counts
+}
+
+fn main() {
+    let generator = np.random.default_rng(42);
+    let samples = generator.normal(10.0, 2.0, 100000);
+    print(`mean ${(samples.mean() as! Float).round()}, standard deviation ${(samples.std() as! Float).round()}`);
+
+    let values = samples.tolist() as! List<Float>;
+    let counts = histogram(values, 4.0, 16.0, 12);
+    let largest = counts.fold(0, (best, count) => best.max(count));
+    for (index, count) in counts.enumerate() {
+        let bar = range(0, count * 40 ~/ largest).map(_ => "#").collect().join("");
+        let label = str(4 + index);
+        print(`${if label.len() < 2 { " " + label } else { label }} ${bar}`);
+    }
+
+    let squares: List<Float> = values.iter().take(1000).map(value => value * value).collect();
+    var view = np.asarray(squares);
+    print(`numpy sees ${view.shape} ${view.dtype} directly on the Nicethon list`);
+    view *= 0.0;
+    print(`writes through numpy are visible: ${squares.iter().all(value => value == 0.0)}`);
+}
