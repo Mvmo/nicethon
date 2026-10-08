@@ -144,7 +144,17 @@ fn main() {
     let python = flag("--python")
         .or_else(|| std::env::var("VIRTUAL_ENV").ok().map(|venv| format!("{venv}/bin/python")))
         .unwrap_or_else(|| "python3".to_string());
-    let (Some(command), Some(file)) = (args.first(), args.get(1)) else {
+    // Flags may stand anywhere before "--"; the rest are command and file.
+    let mut positional = Vec::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "-o" | "--python" => _ = rest.next(),
+            "--release" => {}
+            _ => positional.push(arg),
+        }
+    }
+    let (Some(command), Some(file)) = (positional.first(), positional.get(1)) else {
         eprintln!("usage: nicethon <check|build|run> file.nice [-o dir] [--python path] [--release] [-- program arguments]");
         exit(2);
     };
