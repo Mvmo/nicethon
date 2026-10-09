@@ -1,0 +1,79 @@
+// Reads server configs with python's json module and turns the dynamic
+// result into a typed struct. Every conversion is explicit: try turns the
+// parse exception into a Result, as? checks each field.
+import py * as json from "json";
+
+struct Server {
+    name: Str;
+    port: Int;
+    debug: Bool;
+    hosts: List<Str>;
+    timeout: Float;
+}
+
+enum ConfigError {
+    Syntax(message: Str),
+    NotAnObject,
+    Missing(key: Str),
+    WrongType(key: Str, found: Str),
+}
+
+fn describe(error: ConfigError) -> Str {
+    match error {
+        Syntax(message) => `invalid JSON: ${message}`,
+        NotAnObject => "the config must be a JSON object",
+        Missing(key) => `missing key "${key}"`,
+        WrongType(key, found) => `wrong type for "${key}": ${found}`,
+    }
+}
+
+// One generic function checks every field type: T is known at each call.
+fn field<T>(table: Map<Str, Dyn>, key: Str) -> Result<T, ConfigError> {
+    let value = match table.get(key) {
+        Some(value) => value,
+        None => return Err(ConfigError.Missing(key)),
+    };
+    match value as? T {
+        Some(typed) => Ok(typed),
+        None => Err(ConfigError.WrongType(key, json.dumps(value))),
+    }
+}
+
+fn field_or<T>(table: Map<Str, Dyn>, key: Str, default: T) -> Result<T, ConfigError> {
+    if table.contains(key) { field(table, key) } else { Ok(default) }
+}
+
+fn parse_server(text: Str) -> Result<Server, ConfigError> {
+    let parsed = (try json.loads(text)).map_err(error => ConfigError.Syntax(error.message))?;
+    let table = match parsed as? Map<Str, Dyn> {
+        Some(table) => table,
+        None => return Err(ConfigError.NotAnObject),
+    };
+    Ok(Server(
+        name = field(table, "name")?,
+        port = field(table, "port")?,
+        debug = field_or(table, "debug", false)?,
+        hosts = field(table, "hosts")?,
+        timeout = field_or(table, "timeout", 30.0)?,
+    ))
+}
+
+fn main() {
+    let configs = [
+        "{\"name\": \"api\", \"port\": 8080, \"hosts\": [\"a.local\", \"b.local\"]}",
+        "{\"name\": \"admin\", \"port\": 9000, \"debug\": true, \"hosts\": [\"localhost\"], \"timeout\": 2.5}",
+        "{\"name\": \"broken\", \"port\": \"80\", \"hosts\": []}",
+        "{\"name\": \"lonely\", \"port\": 1}",
+        "[1, 2, 3]",
+        "{\"name\": oops}",
+    ];
+    for text in configs {
+        match parse_server(text) {
+            Ok(server) => {
+                let mode = if server.debug { "debug" } else { "release" };
+                print(`${server.name} on port ${server.port} (${mode}, timeout ${server.timeout}s), hosts: ${server.hosts.join(", ")}`);
+            }
+            Err(error) => print(`rejected: ${describe(error)}`),
+        }
+    }
+}
