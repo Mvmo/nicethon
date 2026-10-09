@@ -1,0 +1,35 @@
+// Computes damped oscillations in typed code and plots them with matplotlib.
+// Run with: nicethon run examples/plot.nice   (writes damped.png)
+import py * as matplotlib from "matplotlib";
+import py * as importlib from "importlib";
+import py { exp, cos, pi } from "math";
+
+struct Curve {
+    label: Str;
+    times: List<Float>;
+    values: List<Float>;
+}
+
+fn damped(damping: Float, frequency: Float, steps: Int) -> Curve {
+    let times: List<Float> = range(0, steps).map(step => step as Float * 0.02).collect();
+    let values = times.map(time => exp(-damping * time) * cos(2.0 * pi * frequency * time));
+    Curve(`damping ${damping}`, times, values)
+}
+
+fn main() {
+    // Choose a backend that needs no window before pyplot is imported.
+    matplotlib.use("Agg");
+    let plt = importlib.import_module("matplotlib.pyplot");
+
+    let curves = [damped(0.2, 1.0, 500), damped(0.6, 1.0, 500), damped(1.5, 1.0, 500)];
+    let (figure, axes) = plt.subplots(figsize = (8, 4)) as! (Dyn, Dyn);
+    for curve in curves {
+        axes.plot(curve.times, curve.values, label = curve.label);
+    }
+    axes.set_xlabel("time in seconds");
+    axes.legend();
+    figure.tight_layout();
+    figure.savefig("damped.png", dpi = 120);
+    let peaks = curves.map(curve => curve.values.iter().skip(25).fold(0.0, (peak, value) => peak.max(value)));
+    print(`wrote damped.png, highest peak after half a second: ${peaks.map(peak => (peak * 1000.0).round() / 1000.0)}`);
+}
