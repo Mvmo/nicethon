@@ -1,0 +1,53 @@
+// An exception thrown into a suspended coroutine (timeout, cancel) arrives
+// at its current await, so try/catch/finally inside the coroutine see it.
+import py * as asyncio from "asyncio";
+import py { BaseException, TimeoutError } from "builtins";
+
+async fn slow(log: List<Str>, name: Str) {
+    try {
+        await asyncio.sleep(10.0);
+        log.push("not reached");
+    } finally {
+        log.push(`${name} cleaned up`);
+    }
+}
+
+async fn stubborn(log: List<Str>) -> Int {
+    try {
+        await asyncio.sleep(10.0);
+    } catch (error: BaseException) {
+        log.push(`stubborn caught ${error.type_name}`);
+    }
+    await asyncio.sleep(0.0);
+    42
+}
+
+async fn scenarios(log: List<Str>) {
+    try {
+        await asyncio.wait_for(slow(log, "timed"), 0.01);
+    } catch (error: TimeoutError) {
+        log.push("wait_for timed out");
+    }
+
+    let task = asyncio.create_task(slow(log, "cancelled"));
+    await asyncio.sleep(0.0);
+    task.cancel();
+    try {
+        await task;
+    } catch (error: BaseException) {
+        log.push(`task raised ${error.type_name}`);
+    }
+
+    let survivor = asyncio.create_task(stubborn(log));
+    await asyncio.sleep(0.0);
+    survivor.cancel();
+    log.push(`survivor returned ${await survivor}`);
+}
+
+fn main() {
+    let log: List<Str> = [];
+    asyncio.run(scenarios(log));
+    for line in log {
+        print(line);
+    }
+}

@@ -1088,6 +1088,7 @@ typedef struct {
     void (*clear)(void *frame);
     void *frame;
     int done;
+    int suspended;
 } nt_Coroutine;
 
 static PyTypeObject nt_CoroutineType;
@@ -1103,7 +1104,19 @@ static PyObject *nt_coroutine_new(nt_Resume resume, void (*clear)(void *), void 
     coroutine->clear = clear;
     coroutine->frame = frame;
     coroutine->done = 0;
+    coroutine->suspended = 0;
     return (PyObject *)coroutine;
+}
+
+// sent == NULL resumes with the pending exception thrown at the current await.
+static PySendResult nt_coroutine_step(nt_Coroutine *coroutine, PyObject *sent, PyObject **result) {
+    int yielded = 0;
+    PyObject *value = coroutine->resume(coroutine->frame, sent, &yielded);
+    coroutine->suspended = yielded;
+    *result = value;
+    if (yielded) return PYGEN_NEXT;
+    coroutine->done = 1;
+    return value ? PYGEN_RETURN : PYGEN_ERROR;
 }
 
 static PySendResult nt_coroutine_am_send(PyObject *self, PyObject *sent, PyObject **result) {
@@ -1113,33 +1126,28 @@ static PySendResult nt_coroutine_am_send(PyObject *self, PyObject *sent, PyObjec
         *result = NULL;
         return PYGEN_ERROR;
     }
-    int yielded = 0;
-    PyObject *value = coroutine->resume(coroutine->frame, sent ? sent : Py_None, &yielded);
-    if (yielded) {
-        *result = value;
-        return PYGEN_NEXT;
+    return nt_coroutine_step(coroutine, sent ? sent : Py_None, result);
+}
+
+// Turns a send result into the iterator protocol: a return value becomes StopIteration.
+static PyObject *nt_coroutine_unpack(PySendResult status, PyObject *result) {
+    if (status != PYGEN_RETURN) return result;
+    if (result == Py_None) PyErr_SetNone(PyExc_StopIteration);
+    else {
+        PyObject *stop = PyObject_CallOneArg(PyExc_StopIteration, result);
+        if (stop) {
+            PyErr_SetObject(PyExc_StopIteration, stop);
+            Py_DECREF(stop);
+        }
     }
-    coroutine->done = 1;
-    *result = value;
-    return value ? PYGEN_RETURN : PYGEN_ERROR;
+    Py_DECREF(result);
+    return NULL;
 }
 
 static PyObject *nt_coroutine_send(PyObject *self, PyObject *sent) {
     PyObject *result;
     PySendResult status = nt_coroutine_am_send(self, sent, &result);
-    if (status == PYGEN_RETURN) {
-        if (result == Py_None) PyErr_SetNone(PyExc_StopIteration);
-        else {
-            PyObject *stop = PyObject_CallOneArg(PyExc_StopIteration, result);
-            if (stop) {
-                PyErr_SetObject(PyExc_StopIteration, stop);
-                Py_DECREF(stop);
-            }
-        }
-        Py_DECREF(result);
-        return NULL;
-    }
-    return result;
+    return nt_coroutine_unpack(status, result);
 }
 
 static PyObject *nt_coroutine_next(PyObject *self) {
@@ -1148,13 +1156,36 @@ static PyObject *nt_coroutine_next(PyObject *self) {
 
 static PyObject *nt_coroutine_throw(PyObject *self, PyObject *const *args, Py_ssize_t nargs) {
     nt_Coroutine *coroutine = (nt_Coroutine *)self;
-    coroutine->done = 1;
-    if (nargs > 0) nt_throw(args[nargs > 1 ? 1 : 0] != Py_None ? args[nargs > 1 ? 1 : 0] : args[0]);
-    return NULL;
+    if (nargs < 1) {
+        PyErr_SetString(PyExc_TypeError, "throw expected at least 1 argument");
+        return NULL;
+    }
+    nt_throw(nargs > 1 && args[1] != Py_None ? args[1] : args[0]);
+    if (!coroutine->suspended) {
+        coroutine->done = 1;
+        return NULL;
+    }
+    PyObject *result;
+    PySendResult status = nt_coroutine_step(coroutine, NULL, &result);
+    return nt_coroutine_unpack(status, result);
 }
 
 static PyObject *nt_coroutine_close(PyObject *self, PyObject *unused) {
-    ((nt_Coroutine *)self)->done = 1;
+    nt_Coroutine *coroutine = (nt_Coroutine *)self;
+    if (coroutine->suspended) {
+        PyErr_SetNone(PyExc_GeneratorExit);
+        PyObject *result;
+        PySendResult status = nt_coroutine_step(coroutine, NULL, &result);
+        if (status == PYGEN_NEXT) {
+            Py_DECREF(result);
+            PyErr_SetString(PyExc_RuntimeError, "coroutine ignored GeneratorExit");
+            return NULL;
+        }
+        if (status == PYGEN_RETURN) Py_DECREF(result);
+        else if (PyErr_ExceptionMatches(PyExc_GeneratorExit)) PyErr_Clear();
+        else return NULL;
+    }
+    coroutine->done = 1;
     Py_RETURN_NONE;
 }
 
@@ -1191,7 +1222,28 @@ static PyTypeObject nt_CoroutineType = {
     .tp_methods = nt_coroutine_methods,
 };
 
+// Forwards the pending exception into the awaited iterator.
+static PySendResult nt_throw_into(PyObject *iterator, PyObject **result) {
+    PyObject *exception = PyErr_GetRaisedException();
+    PyObject *method = PyObject_GetAttrString(iterator, "throw");
+    if (!method) {
+        PyErr_Clear();
+        PyErr_SetRaisedException(exception);
+        return PYGEN_ERROR;
+    }
+    *result = PyObject_CallOneArg(method, exception);
+    Py_DECREF(method);
+    Py_DECREF(exception);
+    if (*result) return PYGEN_NEXT;
+    if (!PyErr_ExceptionMatches(PyExc_StopIteration)) return PYGEN_ERROR;
+    PyObject *stop = PyErr_GetRaisedException();
+    *result = PyObject_GetAttrString(stop, "value");
+    Py_DECREF(stop);
+    return *result ? PYGEN_RETURN : PYGEN_ERROR;
+}
+
 // Awaiting drives the awaited object's iterator one step per resume.
+// sent == NULL throws the pending exception into it.
 // Returns 1 when it yielded, 0 when it finished (both set *result), -1 on error.
 static int nt_await_step(PyObject **iterator, PyObject *awaitable, PyObject *sent, PyObject **result) {
     if (!*iterator) {
@@ -1204,7 +1256,7 @@ static int nt_await_step(PyObject **iterator, PyObject *awaitable, PyObject *sen
         if (!*iterator) return -1;
         sent = Py_None;
     }
-    PySendResult status = PyIter_Send(*iterator, sent, result);
+    PySendResult status = sent ? PyIter_Send(*iterator, sent, result) : nt_throw_into(*iterator, result);
     if (status == PYGEN_ERROR) {
         Py_CLEAR(*iterator);
         return -1;

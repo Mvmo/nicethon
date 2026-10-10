@@ -1,0 +1,6 @@
+timed cleaned up
+wait_for timed out
+cancelled cleaned up
+task raised CancelledError
+stubborn caught CancelledError
+survivor returned 42

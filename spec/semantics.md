@@ -440,8 +440,10 @@ recursive ones included.
 - Calling an `async fn` returns a `Coroutine<T>` that implements Python's
   coroutine protocol (`send`, `throw`, `close`, `__await__`), so
   `asyncio.run` and friends accept it. `await` works on `Coroutine<T>`
-  (gives `T`) and on any `Dyn` awaitable (gives `Dyn`). Throwing into a
-  suspended Nicethon coroutine ends it with that exception.
+  (gives `T`) and on any `Dyn` awaitable (gives `Dyn`). An exception
+  thrown into a suspended coroutine (`task.cancel()`, `wait_for` timeouts)
+  is raised at its current `await`, so `catch` and `finally` in the
+  coroutine see it, as in Python.
 
 ## 12. Native backend
 

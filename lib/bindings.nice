@@ -13,6 +13,7 @@ extern py "builtins" {
     type NotImplementedError : Exception { fn __init__(self, message: Str); }
     type OSError : Exception { fn __init__(self, message: Str); }
     type FileNotFoundError : OSError { fn __init__(self, message: Str); }
+    type TimeoutError : OSError { fn __init__(self, message: Str); }
     type BufferError : Exception { fn __init__(self, message: Str); }
     fn sorted<T, K>(items: List<T>, key?: (T) -> K, reverse?: Bool) -> List<T>;
     fn len(value: Dyn) -> Int;
