@@ -1,0 +1,58 @@
+// Async functions are python coroutines, so asyncio schedules them like any
+// other coroutine: gather runs them concurrently, wait_for adds a timeout.
+import py * as asyncio from "asyncio";
+import py { perf_counter } from "time";
+import py { TimeoutError, ValueError } from "builtins";
+
+struct Download {
+    url: Str;
+    size: Int;
+}
+
+async fn download(url: Str, delay: Float) -> Download {
+    await asyncio.sleep(delay);
+    if url.ends_with(".invalid") {
+        throw ValueError(`cannot resolve ${url}`);
+    }
+    Download(url, url.len() * 1024)
+}
+
+async fn download_all(urls: List<Str>) -> List<Download> {
+    let pending: List<Coroutine<Download>> = [];
+    for url in urls {
+        pending.push(download(url, 0.1));
+    }
+    // gather is untyped python, so its result is Dyn and checked here
+    (await asyncio.gather(*pending)) as! List<Download>
+}
+
+async fn download_with_timeout(url: Str, delay: Float, limit: Float) -> Str {
+    try {
+        let finished = (await asyncio.wait_for(download(url, delay), limit)) as! Download;
+        return `${finished.url}: ${finished.size} bytes`;
+    } catch (error: TimeoutError) {
+        return `${url}: gave up after ${limit}s`;
+    }
+}
+
+async fn report() {
+    let urls = ["python.org", "numpy.org", "nicethon.dev"];
+    let start = perf_counter();
+    let downloads = await download_all(urls);
+    let elapsed = perf_counter() - start;
+    let total = downloads.map(download => download.size) |> sum;
+    print(`${downloads.len()} downloads, ${total} bytes, concurrent: ${elapsed < 0.2}`);
+
+    print(await download_with_timeout("fast.example", 0.01, 0.5));
+    print(await download_with_timeout("slow.example", 1.0, 0.05));
+
+    try {
+        await download_all(["ok.example", "host.invalid"]);
+    } catch (error: ValueError) {
+        print(`one task failed, gather raised: ${error.message}`);
+    }
+}
+
+fn main() {
+    asyncio.run(report());
+}
