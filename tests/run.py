@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Runs the golden tests. Usage: python3 tests/run.py [name filter]"""
+"""Builds the compiler, runs the golden tests and type checks the examples.
+Usage: python3 tests/run.py [name filter]"""
 import os
 import re
 import subprocess
@@ -57,11 +58,18 @@ def interop_test(directory):
     return None if result.stdout == expected else f"expected:\n{expected}\ngot:\n{result.stdout}\n{result.stderr}"
 
 
+def example_test(path):
+    result = subprocess.run([COMPILER, "check", path], capture_output=True, text=True)
+    return result.stderr if result.returncode != 0 else None
+
+
 def main():
+    subprocess.run(["cargo", "build", "--quiet"], cwd=ROOT, check=True)
     selected = sys.argv[1] if len(sys.argv) > 1 else ""
     tests = [(p, run_test) for p in sorted((GOLDEN / "run").glob("*.nice"))]
     tests += [(p, error_test) for p in sorted((GOLDEN / "err").glob("*.nice"))]
     tests += [(p, interop_test) for p in sorted((GOLDEN / "interop").iterdir()) if p.is_dir()]
+    tests += [(p, example_test) for p in sorted((ROOT / "examples").rglob("*.nice"))]
     failed = 0
     for path, check in tests:
         if selected not in path.name:
