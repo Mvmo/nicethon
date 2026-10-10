@@ -39,6 +39,9 @@ compiler (default `cc`).
 (`$VIRTUAL_ENV`) is used, otherwise `python3`. The packages installed for
 that interpreter are the ones a program can import.
 
+Examples are in [examples](examples), from hello world to a Nicethon
+library used by plain Python.
+
 Tests: `python3 tests/run.py` builds the compiler, runs all golden tests
 (`tests/golden/`) and type checks the examples.
 `python3 tests/fuzz.py diff 100` compares random programs against a Python
