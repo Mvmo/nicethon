@@ -1,0 +1,73 @@
+// A geometry library written in Nicethon and imported from python, see
+// use_from_python.py. Only exported items are visible to python, and every
+// exported function checks its arguments when python calls it.
+import py { pi } from "math";
+
+export struct Point {
+    x: Float;
+    y: Float;
+}
+
+export enum Shape {
+    Circle(center: Point, radius: Float),
+    Polygon(corners: List<Point>),
+}
+
+fn distance(start: Point, end: Point) -> Float {
+    ((end.x - start.x) ** 2.0 + (end.y - start.y) ** 2.0).sqrt()
+}
+
+// Pairs every corner with the next one, the last with the first.
+fn edges(corners: List<Point>) -> List<(Point, Point)> {
+    let count = corners.len();
+    range(0, count).map(index => (corners[index], corners[(index + 1) % count])).collect()
+}
+
+export fn area(shape: Shape) -> Float {
+    match shape {
+        Circle(_, radius) => pi * radius * radius,
+        Polygon(corners) => {
+            let twice = edges(corners).fold(0.0, (total, edge) => total + edge.0.x * edge.1.y - edge.1.x * edge.0.y);
+            twice.abs() / 2.0
+        }
+    }
+}
+
+export fn perimeter(shape: Shape) -> Float {
+    match shape {
+        Circle(_, radius) => 2.0 * pi * radius,
+        Polygon(corners) => edges(corners).map(edge => distance(edge.0, edge.1)) |> sum,
+    }
+}
+
+// measure can be any python callable; its result is checked on every call.
+export fn largest(shapes: List<Shape>, measure: (Shape) -> Float) -> Option<Shape> {
+    var best: Option<(Shape, Float)> = None;
+    for shape in shapes {
+        let size = measure(shape);
+        best = match best {
+            Some((_, best_size)) if best_size >= size => best,
+            _ => Some((shape, size)),
+        };
+    }
+    best.map(pair => pair.0)
+}
+
+// Moving average. The result is a List<Float>, which numpy wraps without copying.
+export fn smooth(values: List<Float>, window: Int) -> List<Float> {
+    if window < 1 || window > values.len() {
+        panic(`window must be between 1 and ${values.len()}, got ${window}`);
+    }
+    var running = 0.0;
+    let averages: List<Float> = [];
+    for (index, value) in values.enumerate() {
+        running += value;
+        if index >= window {
+            running -= values[index - window];
+        }
+        if index + 1 >= window {
+            averages.push(running / window as Float);
+        }
+    }
+    averages
+}
