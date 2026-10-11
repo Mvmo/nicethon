@@ -1,0 +1,143 @@
+// The Nicethon half of interop_limits_compare.py. Every exported function has a pure
+// python twin there; the driver checks that both return the same result,
+// times them, and repeats everything to catch references leaking across the
+// boundary. Run from examples/:
+//   nicethon build --release interop_limits.nice -o build
+//   PYTHONPATH=build nicethon python interop_limits_compare.py
+import py * as np from "numpy";
+import py * as asyncio from "asyncio";
+import py { int, sorted, ValueError } from "builtins";
+
+// Typed code alone: the loop touches no python object.
+export fn longest_collatz(limit: Int) -> (Int, Int) {
+    var best = (1, 0);
+    for start in 1..limit {
+        var value = start;
+        var steps = 0;
+        while value != 1 {
+            value = if value % 2 == 0 { value ~/ 2 } else { 3 * value + 1 };
+            steps += 1;
+        }
+        if steps > best.1 {
+            best = (start, steps);
+        }
+    }
+    best
+}
+
+// Nicethon calling python: every result is checked to be an Int.
+export fn call_python(function: (Int) -> Int, count: Int) -> Int {
+    var total = 0;
+    for value in 0..count {
+        total += function(value);
+    }
+    total
+}
+
+// Python calling Nicethon: the driver calls this through its checking wrapper.
+export fn mix(value: Int) -> Int {
+    value * 31 % 1000
+}
+
+// Python calling Nicethon: sorted calls the key lambda once per word.
+export fn sort_words(words: List<Str>) -> List<Str> {
+    sorted(words, key = word => (word.len(), word))
+}
+
+// A python list becomes a List<Float>: copied, every element checked.
+export fn sum_floats(values: List<Float>) -> Float {
+    var total = 0.0;
+    for value in values {
+        total += value;
+    }
+    total
+}
+
+// A List<Float> handed to numpy: np.asarray wraps it without a copy.
+export fn numpy_std(count: Int) -> Float {
+    let values: List<Float> = [];
+    for index in 0..count {
+        values.push((index % 1000) as Float * 0.001);
+    }
+    np.std(np.asarray(values)) as! Float
+}
+
+// Dyn: python objects and python operators, the same work python does.
+export fn dyn_sum_of_squares(values: Dyn) -> Dyn {
+    var total: Dyn = 0;
+    for value in values {
+        total = total + value * value;
+    }
+    total
+}
+
+// Python exceptions in a hot loop: int raises ValueError for every fifth text.
+export fn parse_numbers(texts: List<Str>) -> (Int, Int) {
+    var total = 0;
+    var failures = 0;
+    for text in texts {
+        try {
+            total += int(text) as! Int;
+        } catch (error: ValueError) {
+            failures += 1;
+        }
+    }
+    (total, failures)
+}
+
+// Map is a python dict, so this is dict work driven by native code.
+export fn count_words(words: List<Str>) -> Map<Str, Int> {
+    let counts: Map<Str, Int> = [:];
+    for word in words {
+        counts[word] = counts.get(word).unwrap_or(0) + 1;
+    }
+    counts
+}
+
+// Any python iterable, here a generator, consumed by typed code.
+export fn sum_iterable(items: Dyn) -> Int {
+    var total = 0;
+    for item in items {
+        total += item as! Int;
+    }
+    total
+}
+
+// Records that python creates through the checking constructor.
+export struct Point {
+    x: Float;
+    y: Float;
+}
+
+export fn centroid(points: List<Point>) -> Point {
+    var x = 0.0;
+    var y = 0.0;
+    for point in points {
+        x += point.x;
+        y += point.y;
+    }
+    let count = points.len() as Float;
+    Point(x / count, y / count)
+}
+
+// asyncio drives Nicethon coroutines like its own.
+export async fn tick(rounds: Int) -> Int {
+    for _ in 0..rounds {
+        await asyncio.sleep(0);
+    }
+    rounds
+}
+
+// Boundary behavior, checked by the second part of the driver.
+export fn numbers(count: Int) -> List<Int> {
+    range(0, count).collect()
+}
+
+export fn grow(values: List<Int>) {
+    values.push(values.len());
+}
+
+// Python and Nicethon calling each other: back calls bounce again.
+export fn bounce(depth: Int, back: (Int) -> Int) -> Int {
+    if depth == 0 { 0 } else { back(depth - 1) + 1 }
+}

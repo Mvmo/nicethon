@@ -17,6 +17,7 @@ python, zig and the packages, nothing has to be set up before.
 | [numpy_stats.nice](numpy_stats.nice) | numpy arrays, zero-copy lists |
 | [plot.nice](plot.nice) | typed computation, matplotlib for the picture |
 | [backtest.nice](backtest.nice) | the use case: a path dependent trading backtest over 200,000 bars and 80 parameter sets, 30x faster than python with identical results ([backtest_compare.py](backtest_compare.py)) |
+| [interop_limits.nice](interop_limits.nice) | the boundary under load: 13 scenarios against pure python, 12 edge cases, a leak check ([interop_limits_compare.py](interop_limits_compare.py)) |
 | [py_library](py_library) | a Nicethon module imported from plain Python |
 
 Run them from this directory:
@@ -41,6 +42,16 @@ nicethon build --release backtest.nice -o build
 
 ```bash
 PYTHONPATH=build nicethon python backtest_compare.py
+```
+
+The boundary benchmark works the same way:
+
+```bash
+nicethon build --release interop_limits.nice -o build
+```
+
+```bash
+PYTHONPATH=build nicethon python interop_limits_compare.py
 ```
 
 The Python library example is built once and then imported by the

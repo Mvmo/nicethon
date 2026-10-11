@@ -162,6 +162,10 @@ against the same program in plain Python:
 
 Code that mostly calls numpy or other libraries is about as fast as Python,
 because the time is spent inside the library.
+[examples/interop_limits_compare.py](examples/interop_limits_compare.py)
+measures the boundary itself: calls in both directions, callbacks,
+exceptions, dicts, generators and asyncio run at 1.0x to 1.4x the speed of
+Python, moving 2M floats between numpy and typed lists is 17x to 19x faster.
 
 ## How it works
 
