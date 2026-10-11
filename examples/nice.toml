@@ -1,0 +1,8 @@
+[project]
+name = "examples"
+python = "3.14"
+main = "hello.nice"
+
+[dependencies]
+numpy = "*"
+matplotlib = "*"

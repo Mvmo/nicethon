@@ -1,6 +1,6 @@
 # Plain python using the compiled Nicethon module like any extension module.
-#   nicethon build examples/py_library/geometry.nice -o build
-#   PYTHONPATH=build python examples/py_library/use_from_python.py
+#   nicethon build py_library/geometry.nice -o build
+#   PYTHONPATH=build nicethon python py_library/use_from_python.py
 import numpy as np
 
 import geometry
