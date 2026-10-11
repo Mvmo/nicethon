@@ -1,0 +1,175 @@
+// Backtests a trading strategy on 200,000 one minute bars for 80 parameter
+// sets: a moving average crossover with a trailing stop. The trailing stop
+// remembers the highest price since the entry, so every bar depends on the
+// bars before it. numpy cannot vectorize that, and the same loop in python
+// is about 30 times slower (backtest_compare.py measures it and checks that
+// both agree). numpy makes the prices, matplotlib the picture.
+// Run with: nicethon run --release examples/backtest.nice   (writes backtest.png)
+import py * as np from "numpy";
+import py * as matplotlib from "matplotlib";
+import py * as importlib from "importlib";
+import py { perf_counter } from "time";
+
+const FEE: Float = 0.0005;
+
+export struct Params {
+    fast: Int;
+    slow: Int;
+    stop: Float;
+}
+
+export struct Outcome {
+    params: Params;
+    total_return: Float;
+    max_drawdown: Float;
+    trades: Int;
+}
+
+// A random walk that switches between calm and volatile phases.
+export fn prices(count: Int, seed: Int) -> List<Float> {
+    let rng = np.random.default_rng(seed);
+    let volatility = np.where(np.sin(np.arange(count) / 9000.0) > 0.0, 0.0006, 0.0014);
+    let returns = rng.normal(0.000002, volatility);
+    (np.exp(np.cumsum(returns)) * 100.0).tolist() as! List<Float>
+}
+
+export fn grid() -> List<Params> {
+    let combos: List<Params> = [];
+    for fast in [5, 10, 20, 40] {
+        for slow in [60, 120, 240, 480] {
+            for stop in [0.005, 0.01, 0.02, 0.04, 0.08] {
+                combos.push(Params(fast, slow, stop));
+            }
+        }
+    }
+    combos
+}
+
+export fn backtest(prices: List<Float>, params: Params) -> Outcome {
+    simulate(prices, params, None)
+}
+
+// Long while the fast average is above the slow one, entering only on a
+// fresh cross. Leaves when they cross back or the price falls params.stop
+// below its peak since the entry. Every trade pays FEE in and out.
+fn simulate(prices: List<Float>, params: Params, curve: Option<List<Float>>) -> Outcome {
+    var fast_sum = 0.0;
+    var slow_sum = 0.0;
+    var was_above = true;
+    var entry: Option<Float> = None;
+    var peak = 0.0;
+    var cash = 1.0;
+    var best = 1.0;
+    var max_drawdown = 0.0;
+    var trades = 0;
+    for index in 0..prices.len() {
+        let price = prices[index];
+        fast_sum += price;
+        slow_sum += price;
+        if index >= params.fast {
+            fast_sum -= prices[index - params.fast];
+        }
+        if index >= params.slow {
+            slow_sum -= prices[index - params.slow];
+        }
+        if index + 1 >= params.slow {
+            let above = fast_sum / params.fast as Float > slow_sum / params.slow as Float;
+            match entry {
+                None => {
+                    if above && !was_above {
+                        entry = Some(price);
+                        peak = price;
+                        cash *= 1.0 - FEE;
+                        trades += 1;
+                    }
+                }
+                Some(entered) => {
+                    peak = peak.max(price);
+                    if price < peak * (1.0 - params.stop) || !above {
+                        cash *= price / entered * (1.0 - FEE);
+                        entry = None;
+                    }
+                }
+            }
+            was_above = above;
+        }
+        let equity = match entry {
+            Some(entered) => cash * price / entered,
+            None => cash,
+        };
+        best = best.max(equity);
+        max_drawdown = max_drawdown.max(1.0 - equity / best);
+        if let Some(points) = curve {
+            points.push(equity);
+        }
+    }
+    if let Some(entered) = entry {
+        cash *= prices[prices.len() - 1] / entered * (1.0 - FEE);
+    }
+    Outcome(params, cash - 1.0, max_drawdown, trades)
+}
+
+fn percent(value: Float) -> Str {
+    `${(value * 1000.0).round() / 10.0}%`
+}
+
+fn signed(value: Float) -> Str {
+    if value >= 0.0 { `+${percent(value)}` } else { percent(value) }
+}
+
+fn describe(params: Params) -> Str {
+    `fast ${params.fast}, slow ${params.slow}, stop ${percent(params.stop)}`
+}
+
+fn main() {
+    let series = prices(200000, 7);
+    let combos = grid();
+    let start = perf_counter();
+    let outcomes = combos.map(params => backtest(series, params));
+    let elapsed = ((perf_counter() - start) * 1000.0) as Int;
+    print(`${series.len()} bars, ${outcomes.len()} strategies backtested in ${elapsed} ms`);
+    print(`buy and hold: ${signed(series[series.len() - 1] / series[0] - 1.0)}`);
+    let ranked = outcomes.sort_by(outcome => -outcome.total_return / outcome.max_drawdown.max(0.01));
+    print("best return per drawdown:");
+    for outcome in ranked.iter().take(5) {
+        print(`  ${describe(outcome.params)}: ${signed(outcome.total_return)}, drawdown ${percent(outcome.max_drawdown)}, ${outcome.trades} trades`);
+    }
+    plot(series, ranked[0].params, outcomes);
+}
+
+fn plot(series: List<Float>, best: Params, outcomes: List<Outcome>) {
+    matplotlib.use("Agg");
+    let plt = importlib.import_module("matplotlib.pyplot");
+    let (figure, axes) = plt.subplots(1, 2, figsize = (13, 4.5), width_ratios = [2, 1]) as! (Dyn, Dyn);
+
+    let curve: List<Float> = [];
+    simulate(series, best, Some(curve));
+    let history = axes[0];
+    history.plot(np.asarray(series) / series[0], label = "buy and hold", linewidth = 0.7);
+    history.plot(curve, label = describe(best), linewidth = 0.7);
+    history.set_xlabel("minute");
+    history.set_ylabel("value of 1 invested");
+    history.legend();
+
+    // The best return over all stops, for every pair of averages.
+    let fasts = [5, 10, 20, 40];
+    let slows = [60, 120, 240, 480];
+    let table = fasts.map(fast => slows.map(slow => outcomes
+        .filter(outcome => outcome.params.fast == fast && outcome.params.slow == slow)
+        .fold(-1.0, (top, outcome) => top.max(outcome.total_return))));
+    let heat = axes[1];
+    heat.imshow(table, cmap = "RdYlGn", aspect = "auto");
+    for row in 0..fasts.len() {
+        for column in 0..slows.len() {
+            heat.text(column, row, signed(table[row][column]), ha = "center", va = "center");
+        }
+    }
+    heat.set_xticks([0, 1, 2, 3], slows);
+    heat.set_yticks([0, 1, 2, 3], fasts);
+    heat.set_xlabel("slow average");
+    heat.set_ylabel("fast average");
+    heat.set_title("best return over all stops");
+    figure.tight_layout();
+    figure.savefig("backtest.png", dpi = 110);
+    print("wrote backtest.png");
+}

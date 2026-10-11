@@ -16,6 +16,7 @@ python, zig and the packages, nothing has to be set up before.
 | [async_tasks.nice](async_tasks.nice) | async functions under asyncio: `gather`, `wait_for`, exceptions |
 | [numpy_stats.nice](numpy_stats.nice) | numpy arrays, zero-copy lists |
 | [plot.nice](plot.nice) | typed computation, matplotlib for the picture |
+| [backtest.nice](backtest.nice) | the use case: a path dependent trading backtest over 200,000 bars and 80 parameter sets, 30x faster than python with identical results ([backtest_compare.py](backtest_compare.py)) |
 | [py_library](py_library) | a Nicethon module imported from plain Python |
 
 Run them from this directory:
@@ -30,6 +31,16 @@ nicethon run --release mandelbrot.nice
 
 ```bash
 nicethon run word_count.nice -- README.md
+```
+
+The backtest compares itself with the same loop in pure python:
+
+```bash
+nicethon build --release backtest.nice -o build
+```
+
+```bash
+PYTHONPATH=build nicethon python backtest_compare.py
 ```
 
 The Python library example is built once and then imported by the

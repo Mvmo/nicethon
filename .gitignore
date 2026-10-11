@@ -3,3 +3,4 @@ build/
 .nice/
 __pycache__/
 damped.png
+backtest.png
