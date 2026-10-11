@@ -1,5 +1,10 @@
 # Nicethon
 
+> **An experiment in AI-assisted language development.** Nicethon is built
+> with AI agents. It is a playground, not a production language: syntax,
+> semantics and tooling can change at any time. More in
+> [About this project](#about-this-project).
+
 A statically typed, C-style language on top of the Python ecosystem.
 
 Every Python package (numpy, torch, pandas, the stdlib) can be imported and
@@ -201,3 +206,46 @@ the native list type, boundary checks, coroutines and the intrinsics of the
 - `nice.lock` is resolved on one platform. A package that only another
   platform needs indirectly is missing from it there.
 - Free-threaded CPython builds are not supported.
+
+## About this project
+
+I am trying to apply the knowledge I gathered in my own language project,
+[Duck](https://github.com/duck-compiler/duckc), and to test the limits of
+AI-assisted development in the field of programming languages. That is why
+I created Nicethon as my playground for building programming languages with
+AI. Along the way I experiment with my own ideas of language design, from
+the type system to the syntax and the tooling.
+
+How the work is split:
+
+- I design the language: the syntax, the semantics, the type system and the
+  tooling. I specify the syntax and how the compiler is built, down to its
+  parts, for example how the lexer is structured, based on what I learned
+  building Duck.
+- I instruct the AI agents which code to write and how. They implement it,
+  together with the tests.
+- The agents also write the texts, this README and the documentation
+  included. I provide the content, some of it is completed from the context
+  of the project, and I review the result.
+
+Because most of the code is machine written, nothing is taken on trust:
+
+- Golden tests cover every feature, the error messages included.
+- Differential fuzzing runs random programs as Nicethon and as an equivalent
+  Python model, and the outputs must match.
+- The benchmarks compare every result with pure Python bit for bit, not
+  only the time.
+- Leak checks run the Python boundary thousands of times and watch the
+  allocated memory.
+
+Side notes:
+
+- Nicethon is an experiment and a learning project. Expect rough edges,
+  missing features and breaking changes, and do not use it for anything
+  important.
+- It is tested on macOS. Linux and Windows builds are cross-compiled and
+  link correctly, but have not run there yet.
+- Nicethon is not affiliated with the Python Software Foundation or the
+  Python project. It builds on CPython, it does not replace it.
+- The numbers under [Performance](#performance) come from one machine. They
+  show orders of magnitude, they are not a benchmark suite.
