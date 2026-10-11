@@ -380,12 +380,14 @@ static PyObject *nt_list_new(int kind, Py_ssize_t capacity) {
     return (PyObject *)list;
 }
 
+// Every append goes through here. Like bytearray, a list with a buffer view
+// on it keeps its length, so all views stay valid.
 static int nt_list_reserve(nt_List *list) {
-    if (list->length < list->capacity) return 0;
     if (list->exports > 0) {
         PyErr_SetString(PyExc_BufferError, "cannot resize a list while a buffer view on it exists");
         return -1;
     }
+    if (list->length < list->capacity) return 0;
     char *data = PyMem_Realloc(list->data, list->capacity * 2 * 8);
     if (!data) {
         PyErr_NoMemory();

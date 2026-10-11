@@ -18,6 +18,14 @@ export fn total(values: List<Float>) -> Float {
     values.fold(0.0, (sum, value) => sum + value)
 }
 
+export fn zeros(count: Int) -> List<Float> {
+    range(0, count).map(_ => 0.0).collect()
+}
+
+export fn push_zero(values: List<Float>) {
+    values.push(0.0);
+}
+
 export fn halve(value: Int) -> Int {
     value ~/ 2
 }

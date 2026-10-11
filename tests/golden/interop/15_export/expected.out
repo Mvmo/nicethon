@@ -8,3 +8,5 @@ False
 TypeError: argument 'values': expected List<Float>, found numpy.ndarray
 TypeError: argument 'points': expected List<Point>, found list (item 1 is tuple)
 TypeError: argument 'value': expected Int, found int out of 64 bit range
+BufferError: cannot resize a list while a buffer view on it exists
+3

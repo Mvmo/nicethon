@@ -31,3 +31,13 @@ for attempt in [
         attempt()
     except TypeError as error:
         print("TypeError:", error)
+
+values = geometry.zeros(2)
+view = np.asarray(values)
+try:
+    geometry.push_zero(values)  # the list keeps its length while numpy views it
+except BufferError as error:
+    print("BufferError:", error)
+del view
+geometry.push_zero(values)
+print(len(values))
