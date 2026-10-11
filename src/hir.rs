@@ -345,7 +345,9 @@ impl Program {
 
     pub fn fields(&self, def: DefId) -> &[Field] {
         match &self.defs[def].kind {
-            DefKind::Struct { fields, .. } | DefKind::Variant { fields, .. } | DefKind::PyClass { fields, .. } => fields,
+            DefKind::Struct { fields, .. } | DefKind::Variant { fields, .. } | DefKind::PyClass { fields, .. } => {
+                fields
+            }
             _ => &[],
         }
     }

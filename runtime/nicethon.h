@@ -9,8 +9,6 @@
 
 enum { NT_I64, NT_F64, NT_BOOL, NT_OBJ };
 
-#define NT_FAIL(line) do { nt_lineno = (line); goto error; } while (0)
-
 static PyObject *nt_panic_type;
 static PyObject *nt_frame_globals;
 static PyTypeObject **nt_types;

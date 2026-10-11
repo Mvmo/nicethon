@@ -181,20 +181,56 @@ pub struct Catch {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BinOp {
-    Add, Sub, Mul, Div, FloorDiv, Mod, Pow, MatMul,
-    BitAnd, BitOr, BitXor, Shl, Shr,
-    Eq, Ne, Lt, Le, Gt, Ge, In,
-    And, Or,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    FloorDiv,
+    Mod,
+    Pow,
+    MatMul,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    In,
+    And,
+    Or,
 }
 
 impl BinOp {
     pub fn text(self) -> &'static str {
         use BinOp::*;
         match self {
-            Add => "+", Sub => "-", Mul => "*", Div => "/", FloorDiv => "~/", Mod => "%", Pow => "**",
-            MatMul => "@", BitAnd => "&", BitOr => "|", BitXor => "^", Shl => "<<", Shr => ">>",
-            Eq => "==", Ne => "!=", Lt => "<", Le => "<=", Gt => ">", Ge => ">=", In => "in",
-            And => "&&", Or => "||",
+            Add => "+",
+            Sub => "-",
+            Mul => "*",
+            Div => "/",
+            FloorDiv => "~/",
+            Mod => "%",
+            Pow => "**",
+            MatMul => "@",
+            BitAnd => "&",
+            BitOr => "|",
+            BitXor => "^",
+            Shl => "<<",
+            Shr => ">>",
+            Eq => "==",
+            Ne => "!=",
+            Lt => "<",
+            Le => "<=",
+            Gt => ">",
+            Ge => ">=",
+            In => "in",
+            And => "&&",
+            Or => "||",
         }
     }
 

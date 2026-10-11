@@ -108,7 +108,14 @@ pub fn check(sources: &[Source], entry: usize) -> Result<Program, Vec<Diag>> {
     checker.elaborate_defaults();
     checker.bodies();
     if checker.diags.is_empty() {
-        Ok(Program { defs: checker.defs, fns: checker.fns, globals: checker.globals, impls: checker.impls, subst: checker.subst, entry_module: entry })
+        Ok(Program {
+            defs: checker.defs,
+            fns: checker.fns,
+            globals: checker.globals,
+            impls: checker.impls,
+            subst: checker.subst,
+            entry_module: entry,
+        })
     } else {
         Err(checker.diags)
     }
@@ -195,7 +202,9 @@ impl Checker {
             }
             ast::ItemKind::Impl(_) => return None,
             ast::ItemKind::Struct(decl) => (&decl.name, DefKind::Placeholder),
-            ast::ItemKind::Trait(decl) => (&decl.name, DefKind::Trait { methods: vec![], generics: decl.generics.len() }),
+            ast::ItemKind::Trait(decl) => {
+                (&decl.name, DefKind::Trait { methods: vec![], generics: decl.generics.len() })
+            }
             ast::ItemKind::TypeAlias(name, ..) | ast::ItemKind::Const(name, ..) => (name, DefKind::Placeholder),
         };
         let def = self.add_def(name, item.export, kind);
@@ -242,7 +251,9 @@ impl Checker {
                 .collect();
             for (global, def) in typed {
                 self.globals[global].ty = match &self.defs[def].kind {
-                    DefKind::Fn(sig) if sig.generics.is_empty() => Ty::Fn(sig.params.iter().map(|p| p.ty.clone()).collect(), Box::new(sig.ret.clone())),
+                    DefKind::Fn(sig) if sig.generics.is_empty() => {
+                        Ty::Fn(sig.params.iter().map(|p| p.ty.clone()).collect(), Box::new(sig.ret.clone()))
+                    }
                     DefKind::Alias(_, ty) => ty.clone(),
                     _ => Ty::Dyn,
                 };
@@ -287,7 +298,11 @@ impl Checker {
                 let DefKind::Enum { generics, variants } = self.defs[def].kind.clone() else { unreachable!() };
                 let ctx = FnContext { generics: generics.clone(), ..Default::default() };
                 for (variant, id) in decl.variants.iter().zip(variants) {
-                    let fields = variant.fields.iter().map(|(name, ty)| Field { name: name.clone(), ty: self.resolve_type(ty, &ctx), default: None }).collect();
+                    let fields = variant
+                        .fields
+                        .iter()
+                        .map(|(name, ty)| Field { name: name.clone(), ty: self.resolve_type(ty, &ctx), default: None })
+                        .collect();
                     self.defs[id].kind = DefKind::Variant { parent: def, fields };
                 }
             }
@@ -298,7 +313,8 @@ impl Checker {
                 bounds[0].push((def, (1..generics.len() as u32).map(Ty::Param).collect()));
                 let mut methods = vec![];
                 for method in &decl.methods {
-                    let ctx = self.generic_context(&method.generics, generics.clone(), bounds.clone(), Some(Ty::Param(0)));
+                    let ctx =
+                        self.generic_context(&method.generics, generics.clone(), bounds.clone(), Some(Ty::Param(0)));
                     let kind = if method.body.is_some() { FnKind::Native } else { FnKind::TraitMethod };
                     let id = self.add_fn(None, method, ctx, Some(def), kind, item);
                     methods.push((method.name.clone(), id));
@@ -353,10 +369,14 @@ impl Checker {
                     methods.push((fn_decl.name.clone(), id));
                 }
                 self.empty_fn_state();
-                let bases: Vec<Expr> = decl.bases.iter().map(|base| {
-                    let base = self.check_expr(base, None);
-                    self.dynamic(base)
-                }).collect();
+                let bases: Vec<Expr> = decl
+                    .bases
+                    .iter()
+                    .map(|base| {
+                        let base = self.check_expr(base, None);
+                        self.dynamic(base)
+                    })
+                    .collect();
                 if let DefKind::PyClass { fields: f, methods: m, bases: b, .. } = &mut self.defs[def].kind {
                     (*f, *m, *b) = (fields, methods, bases);
                 }
@@ -371,27 +391,50 @@ impl Checker {
             if let Some(default) = &field.default {
                 self.defaults.push((def, index, default.clone()));
             }
-            result.push(Field { name: Some(field.name.clone()), ty: self.resolve_type(&field.ty, &ctx), default: None });
+            result.push(Field {
+                name: Some(field.name.clone()),
+                ty: self.resolve_type(&field.ty, &ctx),
+                default: None,
+            });
         }
         result
     }
 
     fn extern_type(&mut self, def: DefId, decl: &ast::ExternType, item: &ast::Item) {
         let generics: Vec<String> = decl.generics.iter().map(|g| g.name.clone()).collect();
-        self.defs[def].kind = DefKind::ExternType { generics: generics.clone(), attrs: vec![], methods: vec![], bases: vec![] };
+        self.defs[def].kind =
+            DefKind::ExternType { generics: generics.clone(), attrs: vec![], methods: vec![], bases: vec![] };
         let self_ty = Ty::Named(def, (0..generics.len() as u32).map(Ty::Param).collect());
-        let ctx = FnContext { generics: generics.clone(), bounds: vec![vec![]; generics.len()], self_ty: Some(self_ty.clone()), class: None };
+        let ctx = FnContext {
+            generics: generics.clone(),
+            bounds: vec![vec![]; generics.len()],
+            self_ty: Some(self_ty.clone()),
+            class: None,
+        };
         let bases = decl.bases.iter().map(|b| self.resolve_type(b, &ctx)).collect();
         let attrs = decl.attrs.iter().map(|(n, t)| (n.clone(), self.resolve_type(t, &ctx))).collect();
         let mut methods = vec![];
         for method in &decl.methods {
-            let ctx = self.generic_context(&method.generics, generics.clone(), vec![vec![]; generics.len()], Some(self_ty.clone()));
+            let ctx = self.generic_context(
+                &method.generics,
+                generics.clone(),
+                vec![vec![]; generics.len()],
+                Some(self_ty.clone()),
+            );
             methods.push((method.name.clone(), self.add_fn(None, method, ctx, Some(def), FnKind::PyMethod, item)));
         }
         self.defs[def].kind = DefKind::ExternType { generics, attrs, methods, bases };
     }
 
-    fn add_fn(&mut self, def: Option<DefId>, decl: &ast::FnDecl, ctx: FnContext, owner: Option<DefId>, kind: FnKind, item: &ast::Item) -> DefId {
+    fn add_fn(
+        &mut self,
+        def: Option<DefId>,
+        decl: &ast::FnDecl,
+        ctx: FnContext,
+        owner: Option<DefId>,
+        kind: FnKind,
+        item: &ast::Item,
+    ) -> DefId {
         let sig = self.fn_sig(decl, &ctx, owner, kind);
         let def = match def {
             Some(def) => {
@@ -429,7 +472,8 @@ impl Checker {
 
     fn decorated_type(&mut self, decorator: &Expr, input: Ty, pos: Pos) -> Ty {
         let ExprKind::Global(global) = decorator.kind else { return Ty::Dyn };
-        let binding = self.scopes[self.module].values().find(|b| matches!(b, Binding::TypedPy(g, _) if *g == global)).cloned();
+        let binding =
+            self.scopes[self.module].values().find(|b| matches!(b, Binding::TypedPy(g, _) if *g == global)).cloned();
         let Some(Binding::TypedPy(_, def)) = binding else { return Ty::Dyn };
         let DefKind::Fn(sig) = self.defs[def].kind.clone() else { return Ty::Dyn };
         let (params, ret, _) = self.instantiate(&sig);
@@ -439,12 +483,19 @@ impl Checker {
         self.deep(&ret)
     }
 
-    fn generic_context(&mut self, generics: &[ast::Generic], outer: Vec<String>, outer_bounds: Vec<Vec<Bound>>, self_ty: Option<Ty>) -> FnContext {
+    fn generic_context(
+        &mut self,
+        generics: &[ast::Generic],
+        outer: Vec<String>,
+        outer_bounds: Vec<Vec<Bound>>,
+        self_ty: Option<Ty>,
+    ) -> FnContext {
         let mut ctx = FnContext { generics: outer, bounds: outer_bounds, self_ty, class: None };
         ctx.bounds.resize(ctx.generics.len(), vec![]);
         ctx.generics.extend(generics.iter().map(|g| g.name.clone()));
         // Bounds may name generics declared after them: <I: Iterator<T>, T>.
-        let bounds: Vec<Vec<Bound>> = generics.iter().map(|g| g.bounds.iter().filter_map(|b| self.resolve_bound(b, &ctx)).collect()).collect();
+        let bounds: Vec<Vec<Bound>> =
+            generics.iter().map(|g| g.bounds.iter().filter_map(|b| self.resolve_bound(b, &ctx)).collect()).collect();
         ctx.bounds.extend(bounds);
         ctx
     }
@@ -477,7 +528,13 @@ impl Checker {
             if (param.optional || matches!(param.kind, ast::ParamKind::Star | ast::ParamKind::StarStar)) && !python {
                 self.error(param.pos, "optional and spread parameters are only allowed in extern blocks");
             }
-            params.push(Param { name: param.name.clone(), ty, default: None, optional: param.optional, kind: param.kind });
+            params.push(Param {
+                name: param.name.clone(),
+                ty,
+                default: None,
+                optional: param.optional,
+                kind: param.kind,
+            });
         }
         let ret = decl.ret.as_ref().map_or(Ty::Unit, |ty| self.resolve_type(ty, ctx));
         let generics = ctx.generics.iter().cloned().zip(ctx.bounds.iter().cloned()).collect();
@@ -516,7 +573,9 @@ impl Checker {
     pub fn resolve_type(&mut self, ty: &ast::TypeExpr, ctx: &FnContext) -> Ty {
         let (path, args, pos) = match ty {
             ast::TypeExpr::Tuple(items, _) if items.is_empty() => return Ty::Unit,
-            ast::TypeExpr::Tuple(items, _) => return Ty::Tuple(items.iter().map(|t| self.resolve_type(t, ctx)).collect()),
+            ast::TypeExpr::Tuple(items, _) => {
+                return Ty::Tuple(items.iter().map(|t| self.resolve_type(t, ctx)).collect())
+            }
             ast::TypeExpr::Fn(params, ret, _) => {
                 let params = params.iter().map(|t| self.resolve_type(t, ctx)).collect();
                 return Ty::Fn(params, Box::new(self.resolve_type(ret, ctx)));
@@ -560,7 +619,9 @@ impl Checker {
                 Some(Binding::Def(def)) if self.defs[*def].export => Some(*def),
                 _ => None,
             },
-            (Some(Binding::PyModule(_, module)), 2) => self.externs.get(&module).and_then(|names| names.get(&path[1]).copied()),
+            (Some(Binding::PyModule(_, module)), 2) => {
+                self.externs.get(&module).and_then(|names| names.get(&path[1]).copied())
+            }
             _ => None,
         };
         let Some(def) = def else {
@@ -568,7 +629,9 @@ impl Checker {
             return Ty::Error;
         };
         match &self.defs[def].kind {
-            DefKind::Struct { generics, .. } | DefKind::Enum { generics, .. } | DefKind::ExternType { generics, .. } => {
+            DefKind::Struct { generics, .. }
+            | DefKind::Enum { generics, .. }
+            | DefKind::ExternType { generics, .. } => {
                 let count = generics.len();
                 with_arity(self, count, &|a| Ty::Named(def, a.to_vec()))
             }
@@ -601,7 +664,12 @@ impl Checker {
                 is_async: sig.is_async,
                 ..Default::default()
             };
-            let params = decl.params.iter().zip(&sig.params).map(|(param, info)| self.declare_local(&param.name, info.ty.clone(), param.var)).collect();
+            let params = decl
+                .params
+                .iter()
+                .zip(&sig.params)
+                .map(|(param, info)| self.declare_local(&param.name, info.ty.clone(), param.var))
+                .collect();
             let body = self.check_block(decl.body.as_ref().unwrap(), Some(&sig.ret));
             let body = if sig.ret == Ty::Unit { body } else { self.coerce(body, &sig.ret) };
             for (ty, pos, name) in std::mem::take(&mut self.f.infer) {
@@ -625,7 +693,9 @@ impl Checker {
 
     pub fn fields_of(&self, def: DefId) -> &[Field] {
         match &self.defs[def].kind {
-            DefKind::Struct { fields, .. } | DefKind::Variant { fields, .. } | DefKind::PyClass { fields, .. } => fields,
+            DefKind::Struct { fields, .. } | DefKind::Variant { fields, .. } | DefKind::PyClass { fields, .. } => {
+                fields
+            }
             _ => &[],
         }
     }
@@ -674,11 +744,17 @@ impl Checker {
                 self.subst[*var as usize] = Some(other.clone());
                 true
             }
-            (Ty::List(a), Ty::List(b)) | (Ty::Set(a), Ty::Set(b)) | (Ty::Coroutine(a), Ty::Coroutine(b)) => self.unify(a, b),
+            (Ty::List(a), Ty::List(b)) | (Ty::Set(a), Ty::Set(b)) | (Ty::Coroutine(a), Ty::Coroutine(b)) => {
+                self.unify(a, b)
+            }
             (Ty::Map(a, b), Ty::Map(c, d)) => self.unify(a, c) && self.unify(b, d),
             (Ty::Tuple(a), Ty::Tuple(b)) => a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.unify(x, y)),
-            (Ty::Fn(a, r), Ty::Fn(b, s)) => a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.unify(x, y)) && self.unify(r, s),
-            (Ty::Named(a, x), Ty::Named(b, y)) => a == b && x.len() == y.len() && x.iter().zip(y).all(|(p, q)| self.unify(p, q)),
+            (Ty::Fn(a, r), Ty::Fn(b, s)) => {
+                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.unify(x, y)) && self.unify(r, s)
+            }
+            (Ty::Named(a, x), Ty::Named(b, y)) => {
+                a == b && x.len() == y.len() && x.iter().zip(y).all(|(p, q)| self.unify(p, q))
+            }
             _ => left == right,
         }
     }
@@ -715,7 +791,10 @@ impl Checker {
         let comparable = matches!(ty, Ty::Int | Ty::Float | Ty::Str | Ty::Bool | Ty::BigInt | Ty::Bytes);
         match &ty {
             Ty::Var(_) | Ty::Error | Ty::Never => true,
-            Ty::Param(index) => self.f.bounds.get(*index as usize).is_some_and(|b| b.iter().any(|(t, _)| *t == trait_def)) || (builtin && name != "Ord"),
+            Ty::Param(index) => {
+                self.f.bounds.get(*index as usize).is_some_and(|b| b.iter().any(|(t, _)| *t == trait_def))
+                    || (builtin && name != "Ord")
+            }
             _ if builtin && (name != "Ord" || comparable) => true,
             _ => self.impls.iter().any(|imp| imp.trait_def == Some(trait_def) && same_head(&imp.target, &ty)),
         }
@@ -744,7 +823,8 @@ impl Checker {
         if count == 0 && self.implements(&ty, trait_def) {
             return Some(vec![]);
         }
-        let imp = self.impls.iter().find(|imp| imp.trait_def == Some(trait_def) && same_head(&imp.target, &ty))?.clone();
+        let imp =
+            self.impls.iter().find(|imp| imp.trait_def == Some(trait_def) && same_head(&imp.target, &ty))?.clone();
         let fresh: Vec<Ty> = (0..imp.generics).map(|_| self.fresh()).collect();
         self.unify(&imp.target.subst(&fresh), &ty);
         Some(imp.trait_args.iter().map(|arg| arg.subst(&fresh)).collect())
@@ -760,7 +840,12 @@ pub fn same_head(a: &Ty, b: &Ty) -> bool {
 
 impl Checker {
     pub fn resolve_here(&mut self, ty: &ast::TypeExpr) -> Ty {
-        let ctx = FnContext { generics: self.f.generics.clone(), bounds: self.f.bounds.clone(), self_ty: self.f.self_ty.clone(), class: self.f.class };
+        let ctx = FnContext {
+            generics: self.f.generics.clone(),
+            bounds: self.f.bounds.clone(),
+            self_ty: self.f.self_ty.clone(),
+            class: self.f.class,
+        };
         self.resolve_type(ty, &ctx)
     }
 

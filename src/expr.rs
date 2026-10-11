@@ -99,7 +99,9 @@ impl Checker {
         let all = |a: &[Ty], b: &[Ty]| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.compatible(x, y));
         match (self.shallow(left), self.shallow(right)) {
             (Ty::Var(_), _) | (_, Ty::Var(_)) | (Ty::Error, _) | (_, Ty::Error) => true,
-            (Ty::List(a), Ty::List(b)) | (Ty::Set(a), Ty::Set(b)) | (Ty::Coroutine(a), Ty::Coroutine(b)) => self.compatible(&a, &b),
+            (Ty::List(a), Ty::List(b)) | (Ty::Set(a), Ty::Set(b)) | (Ty::Coroutine(a), Ty::Coroutine(b)) => {
+                self.compatible(&a, &b)
+            }
             (Ty::Map(a, b), Ty::Map(c, d)) => self.compatible(&a, &c) && self.compatible(&b, &d),
             (Ty::Tuple(a), Ty::Tuple(b)) => all(&a, &b),
             (Ty::Fn(a, r), Ty::Fn(b, s)) => all(&a, &b) && self.compatible(&r, &s),
@@ -131,7 +133,8 @@ impl Checker {
             (_, Ty::Never) => left.clone(),
             _ => {
                 if !self.unify(left, right) {
-                    let message = format!("branches have different types: {} and {}", self.show(left), self.show(right));
+                    let message =
+                        format!("branches have different types: {} and {}", self.show(left), self.show(right));
                     self.error(pos, message);
                 }
                 left.clone()
@@ -212,7 +215,8 @@ impl Checker {
                 let params = decl.params.iter().map(|p| (p.name.clone(), p.pos, p.ty.clone())).collect::<Vec<_>>();
                 let ret = decl.ret.as_ref().map_or(Ty::Unit, |ty| self.resolve_here(ty));
                 let body = ast::Expr { kind: ast::ExprKind::Block(decl.body.clone()?), pos: decl.pos };
-                let param_tys: Vec<Ty> = params.iter().map(|(_, _, ty)| ty.as_ref().map_or(Ty::Error, |ty| self.resolve_here(ty))).collect();
+                let param_tys: Vec<Ty> =
+                    params.iter().map(|(_, _, ty)| ty.as_ref().map_or(Ty::Error, |ty| self.resolve_here(ty))).collect();
                 let lambda = self.check_lambda(&params, &body, Some(&Ty::Fn(param_tys, Box::new(ret))), decl.pos);
                 let ty = lambda.ty.clone();
                 let local = self.declare_local(&decl.name, ty.clone(), false);
@@ -224,21 +228,28 @@ impl Checker {
                     .iter()
                     .map(|catch| {
                         self.scoped(|this| {
-                            let filters = catch.filters.iter().map(|f| {
-                                let filter = this.check_expr(f, None);
-                                this.dynamic(filter)
-                            }).collect();
+                            let filters = catch
+                                .filters
+                                .iter()
+                                .map(|f| {
+                                    let filter = this.check_expr(f, None);
+                                    this.dynamic(filter)
+                                })
+                                .collect();
                             let local = this.declare_local(&catch.name, this.builtin_ty("PyErr", vec![]), false);
                             Catch { local, filters, body: this.check_block(&catch.body, None) }
                         })
                     })
                     .collect();
                 let finally = finally.as_ref().map(|block| boxed(self.check_block(block, None)));
-                let diverges = self.shallow(&body.ty) == Ty::Never && catches.iter().all(|c| self.shallow(&c.body.ty) == Ty::Never);
+                let diverges = self.shallow(&body.ty) == Ty::Never
+                    && catches.iter().all(|c| self.shallow(&c.body.ty) == Ty::Never);
                 let ty = if diverges { Ty::Never } else { Ty::Unit };
                 Some(Stmt::Expr(node(ty, ExprKind::Try(boxed(body), catches, finally), *pos)))
             }
-            ast::Stmt::With(items, body, pos) => Some(Stmt::Expr(self.scoped(|this| this.check_with(items, body, *pos)))),
+            ast::Stmt::With(items, body, pos) => {
+                Some(Stmt::Expr(self.scoped(|this| this.check_with(items, body, *pos))))
+            }
         }
     }
 
@@ -248,7 +259,9 @@ impl Checker {
         };
         let manager = self.check_expr(manager, None);
         let entered = match self.shallow(&manager.ty) {
-            Ty::Named(def, args) => self.find_py_method(def, "__enter__").map(|m| self.sig(m).ret.subst(&args)).unwrap_or(Ty::Dyn),
+            Ty::Named(def, args) => {
+                self.find_py_method(def, "__enter__").map(|m| self.sig(m).ret.subst(&args)).unwrap_or(Ty::Dyn)
+            }
             _ => Ty::Dyn,
         };
         let manager = self.dynamic(manager);
@@ -262,7 +275,10 @@ impl Checker {
         let combined;
         let value = match op {
             Some(op) => {
-                combined = ast::Expr { kind: ast::ExprKind::Binary(op, Box::new(place.clone()), Box::new(value.clone())), pos };
+                combined = ast::Expr {
+                    kind: ast::ExprKind::Binary(op, Box::new(place.clone()), Box::new(value.clone())),
+                    pos,
+                };
                 &combined
             }
             None => value,
@@ -281,7 +297,11 @@ impl Checker {
                     let ast::ExprKind::Binary(_, _, right) = &value.kind else { unreachable!() };
                     let right = self.check_expr(right, None);
                     let right = self.dynamic(right);
-                    node(Ty::Dyn, ExprKind::Inplace(op, boxed(node(Ty::Dyn, ExprKind::Local(local), pos)), boxed(right)), pos)
+                    node(
+                        Ty::Dyn,
+                        ExprKind::Inplace(op, boxed(node(Ty::Dyn, ExprKind::Local(local), pos)), boxed(right)),
+                        pos,
+                    )
                 } else {
                     let value = self.check_expr(value, Some(&ty));
                     self.coerce(value, &ty)
@@ -292,7 +312,8 @@ impl Checker {
                 let target = self.check_expr(object, None);
                 match self.shallow(&target.ty) {
                     Ty::Named(def, args) if matches!(self.defs[def].kind, DefKind::Struct { .. }) => {
-                        let Some(index) = self.fields_of(def).iter().position(|f| f.name.as_deref() == Some(field)) else {
+                        let Some(index) = self.fields_of(def).iter().position(|f| f.name.as_deref() == Some(field))
+                        else {
                             self.error(place.pos, format!("{} has no field {field}", self.defs[def].name));
                             return node(Ty::Unit, ExprKind::Unit, pos);
                         };
@@ -303,7 +324,9 @@ impl Checker {
                         let updated = node(ty, ExprKind::CopyWith(boxed(target), def, vec![(index, value)]), pos);
                         self.assign_value(object, updated, &path_text(place), pos)
                     }
-                    Ty::Named(def, args) if matches!(self.defs[def].kind, DefKind::PyClass { .. } | DefKind::ExternType { .. }) => {
+                    Ty::Named(def, args)
+                        if matches!(self.defs[def].kind, DefKind::PyClass { .. } | DefKind::ExternType { .. }) =>
+                    {
                         let field_ty = self.py_attr_type(def, &args, field).unwrap_or(Ty::Dyn);
                         let value = self.check_expr(value, Some(&field_ty));
                         let value = self.coerce(value, &field_ty);
@@ -440,7 +463,8 @@ impl Checker {
                     Some(Ty::Tuple(hints)) if hints.len() == items.len() => hints.clone(),
                     _ => vec![],
                 };
-                let items: Vec<Expr> = items.iter().enumerate().map(|(i, item)| self.check_expr(item, hints.get(i))).collect();
+                let items: Vec<Expr> =
+                    items.iter().enumerate().map(|(i, item)| self.check_expr(item, hints.get(i))).collect();
                 node(Ty::Tuple(items.iter().map(|i| i.ty.clone()).collect()), ExprKind::Tuple(items), pos)
             }
             ast::ExprKind::List(items) => {
@@ -448,10 +472,13 @@ impl Checker {
                     Some(Ty::List(item)) => (**item).clone(),
                     _ => self.fresh(),
                 };
-                let items = items.iter().map(|item| {
-                    let value = self.check_expr(item, Some(&item_ty));
-                    self.coerce(value, &item_ty)
-                }).collect();
+                let items = items
+                    .iter()
+                    .map(|item| {
+                        let value = self.check_expr(item, Some(&item_ty));
+                        self.coerce(value, &item_ty)
+                    })
+                    .collect();
                 node(Ty::List(Box::new(item_ty)), ExprKind::List(items), pos)
             }
             ast::ExprKind::Map(entries) => {
@@ -459,19 +486,26 @@ impl Checker {
                     Some(Ty::Map(key, value)) => ((**key).clone(), (**value).clone()),
                     _ => (self.fresh(), self.fresh()),
                 };
-                let entries = entries.iter().map(|(key, value)| {
-                    let key = self.check_expr(key, Some(&key_ty));
-                    let key = self.coerce(key, &key_ty);
-                    let value = self.check_expr(value, Some(&value_ty));
-                    (key, self.coerce(value, &value_ty))
-                }).collect();
+                let entries = entries
+                    .iter()
+                    .map(|(key, value)| {
+                        let key = self.check_expr(key, Some(&key_ty));
+                        let key = self.coerce(key, &key_ty);
+                        let value = self.check_expr(value, Some(&value_ty));
+                        (key, self.coerce(value, &value_ty))
+                    })
+                    .collect();
                 node(Ty::Map(Box::new(key_ty), Box::new(value_ty)), ExprKind::Map(entries), pos)
             }
             ast::ExprKind::Block(block) => self.check_block(block, expected),
             ast::ExprKind::If(cond, then, otherwise) => match &**cond {
                 ast::Cond::Let(pattern, value) => {
                     let arms = vec![
-                        ast::Arm { pattern: pattern.clone(), guard: None, body: ast::Expr { kind: ast::ExprKind::Block(then.clone()), pos } },
+                        ast::Arm {
+                            pattern: pattern.clone(),
+                            guard: None,
+                            body: ast::Expr { kind: ast::ExprKind::Block(then.clone()), pos },
+                        },
                         ast::Arm {
                             pattern: ast::Pattern { kind: ast::PatKind::Wild, pos },
                             guard: None,
@@ -507,8 +541,16 @@ impl Checker {
             ast::ExprKind::While(cond, body) => match &**cond {
                 ast::Cond::Let(pattern, value) => {
                     let arms = vec![
-                        ast::Arm { pattern: pattern.clone(), guard: None, body: ast::Expr { kind: ast::ExprKind::Block(body.clone()), pos } },
-                        ast::Arm { pattern: ast::Pattern { kind: ast::PatKind::Wild, pos }, guard: None, body: ast::Expr { kind: ast::ExprKind::Break(None), pos } },
+                        ast::Arm {
+                            pattern: pattern.clone(),
+                            guard: None,
+                            body: ast::Expr { kind: ast::ExprKind::Block(body.clone()), pos },
+                        },
+                        ast::Arm {
+                            pattern: ast::Pattern { kind: ast::PatKind::Wild, pos },
+                            guard: None,
+                            body: ast::Expr { kind: ast::ExprKind::Break(None), pos },
+                        },
                     ];
                     let matcher = ast::Expr { kind: ast::ExprKind::Match(Box::new(value.clone()), arms), pos };
                     let block = ast::Block { stmts: vec![ast::Stmt::Expr(matcher)], tail: None, pos };
@@ -581,7 +623,10 @@ impl Checker {
                 let value = self.check_expr(value, None);
                 let throwable = match self.shallow(&value.ty) {
                     Ty::Dyn | Ty::Error => true,
-                    Ty::Named(def, _) => Some(&def) == self.builtins.get("PyErr") || matches!(self.defs[def].kind, DefKind::ExternType { .. } | DefKind::PyClass { .. }),
+                    Ty::Named(def, _) => {
+                        Some(&def) == self.builtins.get("PyErr")
+                            || matches!(self.defs[def].kind, DefKind::ExternType { .. } | DefKind::PyClass { .. })
+                    }
                     _ => false,
                 };
                 if !throwable {
@@ -627,12 +672,15 @@ impl Checker {
                     CastKind::Static => match (&source, self.shallow(&target)) {
                         (Ty::Error, _) => inner,
                         (_, Ty::Dyn) => self.dynamic(inner),
-                        (Ty::Int, Ty::Float) | (Ty::Float, Ty::Int) | (Ty::Int, Ty::BigInt) | (Ty::BigInt, Ty::Int) | (Ty::BigInt, Ty::Float) => {
-                            node(target, ExprKind::Cast(boxed(inner)), pos)
-                        }
+                        (Ty::Int, Ty::Float)
+                        | (Ty::Float, Ty::Int)
+                        | (Ty::Int, Ty::BigInt)
+                        | (Ty::BigInt, Ty::Int)
+                        | (Ty::BigInt, Ty::Float) => node(target, ExprKind::Cast(boxed(inner)), pos),
                         (source, target) if *source == target => inner,
                         _ => {
-                            let message = format!("cannot convert {} to {} with as", self.show(&source), self.show(&target));
+                            let message =
+                                format!("cannot convert {} to {} with as", self.show(&source), self.show(&target));
                             self.error(pos, message);
                             inner
                         }
@@ -700,7 +748,9 @@ impl Checker {
             ast::ExprKind::TupleField(object, index) => {
                 let target = self.check_expr(object, None);
                 match self.shallow(&target.ty) {
-                    Ty::Tuple(items) if *index < items.len() => node(items[*index].clone(), ExprKind::TupleGet(boxed(target), *index), pos),
+                    Ty::Tuple(items) if *index < items.len() => {
+                        node(items[*index].clone(), ExprKind::TupleGet(boxed(target), *index), pos)
+                    }
                     other => {
                         let message = format!("{} has no field {index}", self.show(&other));
                         self.error(pos, message);
@@ -754,7 +804,11 @@ impl Checker {
             }
             (Ty::Named(def, args), Some((ret_def, ret_args))) if def == result && ret_def == result => {
                 if !self.unify(&args[1], &ret_args[1]) {
-                    let message = format!("? cannot return error {} from a function returning {}", self.show(&args[1]), self.show(&ret));
+                    let message = format!(
+                        "? cannot return error {} from a function returning {}",
+                        self.show(&args[1]),
+                        self.show(&ret)
+                    );
                     self.error(pos, message);
                 }
                 args[0].clone()
@@ -776,7 +830,11 @@ impl Checker {
             Ty::Map(key, _) => *key,
             Ty::Str => Ty::Str,
             Ty::Dyn | Ty::Error => Ty::Dyn,
-            Ty::Named(def, _) if matches!(self.defs[def].kind, DefKind::ExternType { .. } | DefKind::PyClass { .. }) => Ty::Dyn,
+            Ty::Named(def, _)
+                if matches!(self.defs[def].kind, DefKind::ExternType { .. } | DefKind::PyClass { .. }) =>
+            {
+                Ty::Dyn
+            }
             other => match self.trait_args_for(&other, self.builtins["Iterator"]) {
                 Some(args) => return self.iterator_loop(pattern, iterable, body, args[0].clone(), pos),
                 None => {
@@ -810,7 +868,10 @@ impl Checker {
                 return node(Ty::Error, ExprKind::Unit, pos);
             };
             let next = this.apply(callee, &[], pos, Some(&this.builtin_ty("Option", vec![item])));
-            let some = ast::Pattern { kind: ast::PatKind::Ctor(vec!["Some".into()], vec![ast::SubPat::Pat(pattern.clone())]), pos };
+            let some = ast::Pattern {
+                kind: ast::PatKind::Ctor(vec!["Some".into()], vec![ast::SubPat::Pat(pattern.clone())]),
+                pos,
+            };
             this.f.loops.push(None);
             let arm = this.scoped(|this| {
                 let checked = this.check_pattern(&some, &next.ty);
@@ -822,23 +883,44 @@ impl Checker {
                 Arm { pattern: checked, guard: None, body: this.check_block(body, None) }
             });
             this.f.loops.pop();
-            let done = Arm { pattern: Pattern { ty: next.ty.clone(), kind: PatKind::Wild }, guard: None, body: node(Ty::Never, ExprKind::Break(None), pos) };
+            let done = Arm {
+                pattern: Pattern { ty: next.ty.clone(), kind: PatKind::Wild },
+                guard: None,
+                body: node(Ty::Never, ExprKind::Break(None), pos),
+            };
             let matcher = node(Ty::Unit, ExprKind::Match(boxed(next), vec![arm, done]), pos);
-            let looped = node(Ty::Unit, ExprKind::Loop(boxed(node(Ty::Unit, ExprKind::Block(vec![Stmt::Expr(matcher)], None), pos))), pos);
+            let looped = node(
+                Ty::Unit,
+                ExprKind::Loop(boxed(node(Ty::Unit, ExprKind::Block(vec![Stmt::Expr(matcher)], None), pos))),
+                pos,
+            );
             let bind = Stmt::Let(Pattern { ty, kind: PatKind::Bind(local) }, iterable);
             node(Ty::Unit, ExprKind::Block(vec![bind], Some(boxed(looped))), pos)
         })
     }
 
-    pub fn check_lambda(&mut self, params: &[(String, Pos, Option<ast::TypeExpr>)], body: &ast::Expr, expected: Option<&Ty>, pos: Pos) -> Expr {
+    pub fn check_lambda(
+        &mut self,
+        params: &[(String, Pos, Option<ast::TypeExpr>)],
+        body: &ast::Expr,
+        expected: Option<&Ty>,
+        pos: Pos,
+    ) -> Expr {
         let expected = expected.map(|ty| self.shallow(ty));
         let (hint_params, hint_ret) = match &expected {
-            Some(Ty::Fn(params_hint, ret)) if params_hint.len() == params.len() => (Some(params_hint.clone()), Some((**ret).clone())),
+            Some(Ty::Fn(params_hint, ret)) if params_hint.len() == params.len() => {
+                (Some(params_hint.clone()), Some((**ret).clone()))
+            }
             _ => (None, None),
         };
         let dynamic = expected == Some(Ty::Dyn);
         let index = self.f.lambdas.len();
-        self.f.lambdas.push(Lambda { params: vec![], captures: vec![], body: node(Ty::Unit, ExprKind::Unit, pos), ret: Ty::Unit });
+        self.f.lambdas.push(Lambda {
+            params: vec![],
+            captures: vec![],
+            body: node(Ty::Unit, ExprKind::Unit, pos),
+            ret: Ty::Unit,
+        });
         self.f.owners.push(index + 1);
         self.f.scopes.push(HashMap::new());
         let mut param_tys = vec![];
@@ -850,7 +932,8 @@ impl Checker {
                     let ty = self.resolve_here(ty);
                     if let Some(hint) = hint {
                         if !self.unify(&ty, &hint) {
-                            let message = format!("expected parameter of type {}, found {}", self.show(&hint), self.show(&ty));
+                            let message =
+                                format!("expected parameter of type {}, found {}", self.show(&hint), self.show(&ty));
                             self.error(*param_pos, message);
                         }
                     }
@@ -885,14 +968,23 @@ impl Checker {
         node(Ty::Fn(param_tys, Box::new(ret)), ExprKind::Lambda(index), pos)
     }
 
-    fn check_binary(&mut self, op: BinOp, left: &ast::Expr, right: &ast::Expr, pos: Pos, expected: Option<&Ty>) -> Expr {
+    fn check_binary(
+        &mut self,
+        op: BinOp,
+        left: &ast::Expr,
+        right: &ast::Expr,
+        pos: Pos,
+        expected: Option<&Ty>,
+    ) -> Expr {
         if matches!(op, BinOp::And | BinOp::Or) {
             let left = self.check_cond(left);
             let right = self.check_cond(right);
             return node(Ty::Bool, ExprKind::Binary(op, boxed(left), boxed(right)), pos);
         }
-        let literal = |e: &ast::Expr| matches!(&e.kind, ast::ExprKind::Int(_) | ast::ExprKind::Float(_))
-            || matches!(&e.kind, ast::ExprKind::Unary(UnOp::Neg, inner) if matches!(inner.kind, ast::ExprKind::Int(_) | ast::ExprKind::Float(_)));
+        let number = |kind: &ast::ExprKind| matches!(kind, ast::ExprKind::Int(_) | ast::ExprKind::Float(_));
+        let literal = |e: &ast::Expr| {
+            number(&e.kind) || matches!(&e.kind, ast::ExprKind::Unary(UnOp::Neg, inner) if number(&inner.kind))
+        };
         let arithmetic = !op.is_comparison() && !matches!(op, BinOp::In | BinOp::Div);
         let expected = expected.filter(|_| arithmetic);
         let (left, right) = if literal(left) && !literal(right) && op != BinOp::In {
@@ -962,7 +1054,11 @@ impl Checker {
                 (Ty::Int, Ty::Int, BinOp::Div) | (Ty::BigInt, Ty::BigInt, BinOp::Div) => Ty::Float,
                 (Ty::Int, Ty::Int, BinOp::MatMul) => self.bad_operands(op, &left_ty, &right_ty, pos),
                 (Ty::Int, Ty::Int, _) | (Ty::BigInt, Ty::BigInt, _) => left_ty.clone(),
-                (Ty::Float, Ty::Float, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::FloorDiv | BinOp::Mod | BinOp::Pow) => Ty::Float,
+                (
+                    Ty::Float,
+                    Ty::Float,
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::FloorDiv | BinOp::Mod | BinOp::Pow,
+                ) => Ty::Float,
                 (Ty::Str, Ty::Str, BinOp::Add) => Ty::Str,
                 (Ty::List(_), Ty::List(_), BinOp::Add) if self.unify(&left_ty, &right_ty) => left_ty.clone(),
                 (Ty::Param(_), Ty::Param(_), _) if left_ty == right_ty => left_ty.clone(),
@@ -1023,7 +1119,9 @@ impl Checker {
     fn binding_value(&mut self, binding: Binding, name: &str, pos: Pos) -> Expr {
         match binding {
             Binding::Def(def) => self.def_value(def, pos),
-            Binding::Global(global) | Binding::TypedPy(global, _) | Binding::PyModule(global, _) => node(self.globals[global].ty.clone(), ExprKind::Global(global), pos),
+            Binding::Global(global) | Binding::TypedPy(global, _) | Binding::PyModule(global, _) => {
+                node(self.globals[global].ty.clone(), ExprKind::Global(global), pos)
+            }
             Binding::NiceModule(_) => {
                 self.error(pos, format!("module {name} is not a value"));
                 node(Ty::Error, ExprKind::Unit, pos)
@@ -1053,7 +1151,9 @@ impl Checker {
 
     fn fresh_named(&mut self, def: DefId) -> Ty {
         let count = match &self.defs[def].kind {
-            DefKind::Struct { generics, .. } | DefKind::Enum { generics, .. } | DefKind::ExternType { generics, .. } => generics.len(),
+            DefKind::Struct { generics, .. }
+            | DefKind::Enum { generics, .. }
+            | DefKind::ExternType { generics, .. } => generics.len(),
             _ => 0,
         };
         let args = (0..count).map(|_| self.fresh()).collect();
@@ -1071,9 +1171,18 @@ impl Checker {
             }
         }
         match self.lookup(name)? {
-            Binding::Def(def) if matches!(self.defs[def].kind, DefKind::Struct { .. } | DefKind::Enum { .. } | DefKind::PyClass { .. }) => Some(Binding::Def(def)),
+            Binding::Def(def)
+                if matches!(
+                    self.defs[def].kind,
+                    DefKind::Struct { .. } | DefKind::Enum { .. } | DefKind::PyClass { .. }
+                ) =>
+            {
+                Some(Binding::Def(def))
+            }
             binding @ (Binding::PyModule(..) | Binding::NiceModule(_)) => Some(binding),
-            Binding::TypedPy(global, def) if matches!(self.defs[def].kind, DefKind::ExternType { .. }) => Some(Binding::TypedPy(global, def)),
+            Binding::TypedPy(global, def) if matches!(self.defs[def].kind, DefKind::ExternType { .. }) => {
+                Some(Binding::TypedPy(global, def))
+            }
             _ => None,
         }
     }
@@ -1088,7 +1197,11 @@ impl Checker {
                 }
                 if let DefKind::PyClass { global, methods, .. } = &self.defs[def].kind {
                     let method = methods.iter().find(|(m, _)| m == name).map(|(_, d)| *d);
-                    let attr = node(Ty::Dyn, ExprKind::PyAttr(boxed(node(Ty::Dyn, ExprKind::Global(*global), pos)), name.to_string()), pos);
+                    let attr = node(
+                        Ty::Dyn,
+                        ExprKind::PyAttr(boxed(node(Ty::Dyn, ExprKind::Global(*global), pos)), name.to_string()),
+                        pos,
+                    );
                     return Some(Callee::Py(attr, method, None));
                 }
                 let ty = self.fresh_named(def);
@@ -1096,11 +1209,19 @@ impl Checker {
             }
             Binding::TypedPy(global, def) => {
                 let method = self.find_py_method(def, name);
-                let attr = node(Ty::Dyn, ExprKind::PyAttr(boxed(node(Ty::Dyn, ExprKind::Global(global), pos)), name.to_string()), pos);
+                let attr = node(
+                    Ty::Dyn,
+                    ExprKind::PyAttr(boxed(node(Ty::Dyn, ExprKind::Global(global), pos)), name.to_string()),
+                    pos,
+                );
                 Some(Callee::Py(attr, method, None))
             }
             Binding::PyModule(global, module) => {
-                let attr = node(Ty::Dyn, ExprKind::PyAttr(boxed(node(Ty::Dyn, ExprKind::Global(global), pos)), name.to_string()), pos);
+                let attr = node(
+                    Ty::Dyn,
+                    ExprKind::PyAttr(boxed(node(Ty::Dyn, ExprKind::Global(global), pos)), name.to_string()),
+                    pos,
+                );
                 let def = self.externs.get(&module).and_then(|names| names.get(name)).copied();
                 Some(match def.map(|d| (d, &self.defs[d].kind)) {
                     Some((def, DefKind::ExternType { .. })) => Callee::PyConstruct(attr, def),
@@ -1130,12 +1251,17 @@ impl Checker {
         if let Some(owner) = self.type_name(object) {
             match owner.clone() {
                 Binding::PyModule(global, module) => {
-                    let attr = node(Ty::Dyn, ExprKind::PyAttr(boxed(node(Ty::Dyn, ExprKind::Global(global), pos)), name.to_string()), pos);
+                    let attr = node(
+                        Ty::Dyn,
+                        ExprKind::PyAttr(boxed(node(Ty::Dyn, ExprKind::Global(global), pos)), name.to_string()),
+                        pos,
+                    );
                     let def = self.externs.get(&module).and_then(|names| names.get(name)).copied();
                     return match def.map(|d| self.defs[d].kind.clone()) {
                         Some(DefKind::Alias(_, ty)) => self.typed(attr, ty),
                         Some(DefKind::Fn(sig)) if sig.generics.is_empty() => {
-                            let ty = Ty::Fn(sig.params.iter().map(|p| p.ty.clone()).collect(), Box::new(sig.ret.clone()));
+                            let ty =
+                                Ty::Fn(sig.params.iter().map(|p| p.ty.clone()).collect(), Box::new(sig.ret.clone()));
                             Expr { ty, ..attr }
                         }
                         _ => attr,
@@ -1143,7 +1269,9 @@ impl Checker {
                 }
                 Binding::NiceModule(module) => {
                     return match self.scopes[module].get(name).cloned() {
-                        Some(binding @ Binding::Def(def)) if self.defs[def].export => self.binding_value(binding, name, pos),
+                        Some(binding @ Binding::Def(def)) if self.defs[def].export => {
+                            self.binding_value(binding, name, pos)
+                        }
                         _ => {
                             self.error(pos, format!("module has no export {name}"));
                             node(Ty::Error, ExprKind::Unit, pos)
@@ -1163,7 +1291,9 @@ impl Checker {
                 }
                 _ => {}
             }
-            if !matches!(owner, Binding::Def(def) if matches!(self.defs[def].kind, DefKind::PyClass { .. })) && !matches!(owner, Binding::TypedPy(..)) {
+            if !matches!(owner, Binding::Def(def) if matches!(self.defs[def].kind, DefKind::PyClass { .. }))
+                && !matches!(owner, Binding::TypedPy(..))
+            {
                 self.error(pos, format!("unknown member {name}"));
                 return node(Ty::Error, ExprKind::Unit, pos);
             }
@@ -1206,15 +1336,21 @@ impl Checker {
 
     pub fn find_py_method(&self, def: DefId, name: &str) -> Option<DefId> {
         match &self.defs[def].kind {
-            DefKind::PyClass { methods, bases, .. } => methods.iter().find(|(m, _)| m == name).map(|(_, d)| *d).or_else(|| {
-                bases.iter().find_map(|base| self.py_base(def, base).and_then(|base| self.find_py_method(base, name)))
-            }),
-            DefKind::ExternType { methods, bases, .. } => methods.iter().find(|(m, _)| m == name).map(|(_, d)| *d).or_else(|| {
-                bases.iter().find_map(|base| match base {
-                    Ty::Named(base, _) => self.find_py_method(*base, name),
-                    _ => None,
+            DefKind::PyClass { methods, bases, .. } => {
+                methods.iter().find(|(m, _)| m == name).map(|(_, d)| *d).or_else(|| {
+                    bases
+                        .iter()
+                        .find_map(|base| self.py_base(def, base).and_then(|base| self.find_py_method(base, name)))
                 })
-            }),
+            }
+            DefKind::ExternType { methods, bases, .. } => {
+                methods.iter().find(|(m, _)| m == name).map(|(_, d)| *d).or_else(|| {
+                    bases.iter().find_map(|base| match base {
+                        Ty::Named(base, _) => self.find_py_method(*base, name),
+                        _ => None,
+                    })
+                })
+            }
             _ => None,
         }
     }
@@ -1229,15 +1365,21 @@ impl Checker {
 
     fn py_attr_type(&self, def: DefId, args: &[Ty], name: &str) -> Option<Ty> {
         match &self.defs[def].kind {
-            DefKind::PyClass { fields, bases, .. } => fields.iter().find(|f| f.name.as_deref() == Some(name)).map(|f| f.ty.clone()).or_else(|| {
-                bases.iter().find_map(|base| self.py_base(def, base).and_then(|base| self.py_attr_type(base, &[], name)))
-            }),
-            DefKind::ExternType { attrs, bases, .. } => attrs.iter().find(|(a, _)| a == name).map(|(_, ty)| ty.subst(args)).or_else(|| {
-                bases.iter().find_map(|base| match base {
-                    Ty::Named(base, base_args) => self.py_attr_type(*base, base_args, name),
-                    _ => None,
+            DefKind::PyClass { fields, bases, .. } => {
+                fields.iter().find(|f| f.name.as_deref() == Some(name)).map(|f| f.ty.clone()).or_else(|| {
+                    bases
+                        .iter()
+                        .find_map(|base| self.py_base(def, base).and_then(|base| self.py_attr_type(base, &[], name)))
                 })
-            }),
+            }
+            DefKind::ExternType { attrs, bases, .. } => {
+                attrs.iter().find(|(a, _)| a == name).map(|(_, ty)| ty.subst(args)).or_else(|| {
+                    bases.iter().find_map(|base| match base {
+                        Ty::Named(base, base_args) => self.py_attr_type(*base, base_args, name),
+                        _ => None,
+                    })
+                })
+            }
             _ => None,
         }
     }
@@ -1265,7 +1407,8 @@ impl Checker {
 
     fn check_call(&mut self, callee: &ast::Expr, args: &[ast::Arg], pos: Pos, expected: Option<&Ty>) -> Expr {
         let callee = match &callee.kind {
-            ast::ExprKind::Name(name) if self.f.scopes.iter().all(|s| !s.contains_key(name)) => match self.lookup(name) {
+            ast::ExprKind::Name(name) if self.f.scopes.iter().all(|s| !s.contains_key(name)) => match self.lookup(name)
+            {
                 Some(Binding::Def(def)) => match self.def_callee(def, pos) {
                     Some(callee) => callee,
                     None => {
@@ -1335,17 +1478,25 @@ impl Checker {
 
     fn method_callee(&mut self, target: Expr, name: &str, pos: Pos) -> Option<Callee> {
         let ty = self.shallow(&target.ty);
-        let attr = |this: &mut Self, target: Expr| node(Ty::Dyn, ExprKind::PyAttr(boxed(this.dynamic(target)), name.to_string()), pos);
+        let attr = |this: &mut Self, target: Expr| {
+            node(Ty::Dyn, ExprKind::PyAttr(boxed(this.dynamic(target)), name.to_string()), pos)
+        };
         match &ty {
             Ty::Dyn | Ty::Error => return Some(Callee::Py(attr(self, target), None, None)),
-            Ty::Named(def, _) if name == "copy" && matches!(self.defs[*def].kind, DefKind::Struct { .. }) => return Some(Callee::Copy(target, *def)),
-            Ty::Named(def, _) if matches!(self.defs[*def].kind, DefKind::PyClass { .. } | DefKind::ExternType { .. }) => {
+            Ty::Named(def, _) if name == "copy" && matches!(self.defs[*def].kind, DefKind::Struct { .. }) => {
+                return Some(Callee::Copy(target, *def))
+            }
+            Ty::Named(def, _)
+                if matches!(self.defs[*def].kind, DefKind::PyClass { .. } | DefKind::ExternType { .. }) =>
+            {
                 let method = self.find_py_method(*def, name);
                 return Some(Callee::Py(attr(self, target), method, Some(ty.clone())));
             }
             Ty::Param(index) => {
                 let bounds = self.f.bounds.get(*index as usize).cloned().unwrap_or_default();
-                if let Some((method, args)) = bounds.iter().find_map(|(b, args)| Some((self.trait_method(*b, name)?, args.clone()))) {
+                if let Some((method, args)) =
+                    bounds.iter().find_map(|(b, args)| Some((self.trait_method(*b, name)?, args.clone())))
+                {
                     return Some(Callee::Trait(target, method, args));
                 }
             }
@@ -1420,7 +1571,13 @@ impl Checker {
                 let params: Vec<Param> = fields
                     .iter()
                     .enumerate()
-                    .map(|(i, f)| Param { name: f.name.clone().unwrap_or_else(|| i.to_string()), ty: f.ty.clone(), default: f.default.clone(), optional: false, kind: ast::ParamKind::Normal })
+                    .map(|(i, f)| Param {
+                        name: f.name.clone().unwrap_or_else(|| i.to_string()),
+                        ty: f.ty.clone(),
+                        default: f.default.clone(),
+                        optional: false,
+                        kind: ast::ParamKind::Normal,
+                    })
                     .collect();
                 let tys: Vec<Ty> = params.iter().map(|p| p.ty.subst(type_args)).collect();
                 let matched = self.match_args(&params, &tys, args, pos);
@@ -1449,7 +1606,17 @@ impl Checker {
             }
             Callee::Value(value) => {
                 let Ty::Fn(params, ret) = self.shallow(&value.ty) else { unreachable!() };
-                let infos: Vec<Param> = params.iter().enumerate().map(|(i, ty)| Param { name: i.to_string(), ty: ty.clone(), default: None, optional: false, kind: ast::ParamKind::Normal }).collect();
+                let infos: Vec<Param> = params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, ty)| Param {
+                        name: i.to_string(),
+                        ty: ty.clone(),
+                        default: None,
+                        optional: false,
+                        kind: ast::ParamKind::Normal,
+                    })
+                    .collect();
                 if args.iter().any(|a| !matches!(a, ast::Arg::Pos(_))) {
                     self.error(pos, "function values only take positional arguments");
                 }
@@ -1460,7 +1627,9 @@ impl Checker {
             Callee::Py(function, sig_def, receiver) => {
                 let typed = sig_def.map(|def| {
                     let sig = self.sig(def).clone();
-                    let skip = (sig.kind == FnKind::PyMethod || sig.owner.is_some_and(|o| matches!(self.defs[o].kind, DefKind::PyClass { .. }))) as usize;
+                    let skip = (sig.kind == FnKind::PyMethod
+                        || sig.owner.is_some_and(|o| matches!(self.defs[o].kind, DefKind::PyClass { .. })))
+                        as usize;
                     (sig, skip)
                 });
                 let function = self.dynamic(function);
@@ -1492,7 +1661,9 @@ impl Checker {
                     Some(init) => {
                         let sig = self.sig(init).clone();
                         let mut all_args = type_args.clone();
-                        all_args.extend(sig.generics[type_args.len().min(sig.generics.len())..].iter().map(|_| self.fresh()));
+                        all_args.extend(
+                            sig.generics[type_args.len().min(sig.generics.len())..].iter().map(|_| self.fresh()),
+                        );
                         let params: Vec<Ty> = sig.params.iter().map(|p| p.ty.subst(&all_args)).collect();
                         let skip = (!params.is_empty()) as usize;
                         self.py_args(&sig.params[skip..], &params[skip..], args, pos)
@@ -1621,11 +1792,15 @@ impl Checker {
                     next += 1;
                 }
                 ast::Arg::Named(name, value) => match infos.iter().position(|p| p.name == *name) {
-                    Some(index) if slots[index].is_some() => self.error(value.pos, format!("argument {name} given twice")),
+                    Some(index) if slots[index].is_some() => {
+                        self.error(value.pos, format!("argument {name} given twice"))
+                    }
                     Some(index) => slots[index] = Some(value),
                     None => self.error(value.pos, format!("unknown argument {name}")),
                 },
-                ast::Arg::Star(value) | ast::Arg::StarStar(value) => self.error(value.pos, "spread arguments are only allowed in python calls"),
+                ast::Arg::Star(value) | ast::Arg::StarStar(value) => {
+                    self.error(value.pos, "spread arguments are only allowed in python calls")
+                }
             }
         }
         let mut values: Vec<Option<Expr>> = vec![None; infos.len()];
@@ -1651,7 +1826,9 @@ impl Checker {
         matched
             .into_iter()
             .zip(infos)
-            .map(|(value, info)| value.or_else(|| info.default.clone()).unwrap_or_else(|| node(Ty::Error, ExprKind::Unit, pos)))
+            .map(|(value, info)| {
+                value.or_else(|| info.default.clone()).unwrap_or_else(|| node(Ty::Error, ExprKind::Unit, pos))
+            })
             .collect()
     }
 
@@ -1668,7 +1845,9 @@ impl Checker {
                     let value = self.check_expr(e, None);
                     PyIndexPart::Expr(self.dynamic(value))
                 }
-                ast::IndexArg::Slice(start, stop, step) => PyIndexPart::Slice(dynamic(self, start), dynamic(self, stop), dynamic(self, step)),
+                ast::IndexArg::Slice(start, stop, step) => {
+                    PyIndexPart::Slice(dynamic(self, start), dynamic(self, stop), dynamic(self, step))
+                }
                 ast::IndexArg::Ellipsis => PyIndexPart::Ellipsis,
             })
             .collect()
@@ -1703,7 +1882,9 @@ impl Checker {
             PatKind::Or(alternatives) => alternatives.iter().any(|p| self.irrefutable(p)),
             PatKind::Variant(def, fields) => {
                 let single = match &self.defs[*def].kind {
-                    DefKind::Variant { parent, .. } => matches!(&self.defs[*parent].kind, DefKind::Enum { variants, .. } if variants.len() == 1),
+                    DefKind::Variant { parent, .. } => {
+                        matches!(&self.defs[*parent].kind, DefKind::Enum { variants, .. } if variants.len() == 1)
+                    }
                     _ => true,
                 };
                 single && fields.iter().all(|(_, p)| self.irrefutable(p))
@@ -1728,7 +1909,9 @@ impl Checker {
         let mut expanded = vec![];
         for row in rows {
             match &row[0].kind {
-                PatKind::Or(alternatives) => expanded.extend(alternatives.iter().map(|alternative| [vec![alternative.clone()], row[1..].to_vec()].concat())),
+                PatKind::Or(alternatives) => expanded.extend(
+                    alternatives.iter().map(|alternative| [vec![alternative.clone()], row[1..].to_vec()].concat()),
+                ),
                 _ => expanded.push(row),
             }
         }
@@ -1738,7 +1921,9 @@ impl Checker {
             for (constructor, name, fields) in constructors {
                 let rows = expanded
                     .iter()
-                    .filter_map(|row| Some([self.specialize(&row[0], &constructor, &fields)?, row[1..].to_vec()].concat()))
+                    .filter_map(|row| {
+                        Some([self.specialize(&row[0], &constructor, &fields)?, row[1..].to_vec()].concat())
+                    })
                     .collect();
                 if let Some(witness) = self.uncovered(rows, &[fields.clone(), rest.to_vec()].concat()) {
                     let (inner, outer) = witness.split_at(fields.len());
@@ -1767,11 +1952,21 @@ impl Checker {
     fn constructors(&self, ty: &Ty) -> Option<Vec<(Constructor, String, Vec<Ty>)>> {
         let fields = |def: DefId, args: &[Ty]| self.fields_of(def).iter().map(|f| f.ty.subst(args)).collect::<Vec<_>>();
         match self.shallow(ty) {
-            Ty::Bool => Some(vec![(Constructor::Bool(true), "true".into(), vec![]), (Constructor::Bool(false), "false".into(), vec![])]),
+            Ty::Bool => Some(vec![
+                (Constructor::Bool(true), "true".into(), vec![]),
+                (Constructor::Bool(false), "false".into(), vec![]),
+            ]),
             Ty::Tuple(items) => Some(vec![(Constructor::Tuple, String::new(), items)]),
             Ty::Named(def, args) => match &self.defs[def].kind {
-                DefKind::Enum { variants, .. } => Some(variants.iter().map(|v| (Constructor::Variant(*v), self.defs[*v].name.clone(), fields(*v, &args))).collect()),
-                DefKind::Struct { .. } => Some(vec![(Constructor::Variant(def), self.defs[def].name.clone(), fields(def, &args))]),
+                DefKind::Enum { variants, .. } => Some(
+                    variants
+                        .iter()
+                        .map(|v| (Constructor::Variant(*v), self.defs[*v].name.clone(), fields(*v, &args)))
+                        .collect(),
+                ),
+                DefKind::Struct { .. } => {
+                    Some(vec![(Constructor::Variant(def), self.defs[def].name.clone(), fields(def, &args))])
+                }
                 _ => None,
             },
             _ => None,
@@ -1790,7 +1985,9 @@ impl Checker {
                 Some(result)
             }
             (PatKind::Tuple(items), Constructor::Tuple) => Some(items.clone()),
-            (PatKind::Lit(literal), Constructor::Bool(value)) => matches!(literal.kind, ExprKind::Bool(b) if b == *value).then(Vec::new),
+            (PatKind::Lit(literal), Constructor::Bool(value)) => {
+                matches!(literal.kind, ExprKind::Bool(b) if b == *value).then(Vec::new)
+            }
             _ => None,
         }
     }
@@ -1807,7 +2004,9 @@ impl Checker {
             ast::PatKind::Ident(name) => {
                 let variant = match self.shallow(ty) {
                     Ty::Named(def, _) => match &self.defs[def].kind {
-                        DefKind::Enum { variants, .. } => variants.iter().copied().find(|v| self.defs[*v].name == *name),
+                        DefKind::Enum { variants, .. } => {
+                            variants.iter().copied().find(|v| self.defs[*v].name == *name)
+                        }
                         _ => None,
                     },
                     _ => None,
@@ -1854,7 +2053,11 @@ impl Checker {
                     }
                 };
                 let rest = matches!(subs.last(), Some(ast::SubPat::Rest));
-                let items = subs.iter().filter(|s| !matches!(s, ast::SubPat::Rest)).map(|sub| self.sub_pattern(sub, &item)).collect();
+                let items = subs
+                    .iter()
+                    .filter(|s| !matches!(s, ast::SubPat::Rest))
+                    .map(|sub| self.sub_pattern(sub, &item))
+                    .collect();
                 PatKind::List(items, rest)
             }
             ast::PatKind::Or(alternatives) => {
@@ -1894,7 +2097,8 @@ impl Checker {
             },
             _ => None,
         });
-        let Some(def) = def.filter(|d| matches!(self.defs[*d].kind, DefKind::Variant { .. } | DefKind::Struct { .. })) else {
+        let Some(def) = def.filter(|d| matches!(self.defs[*d].kind, DefKind::Variant { .. } | DefKind::Struct { .. }))
+        else {
             self.error(pos, format!("unknown variant {}", path.join(".")));
             return PatKind::Wild;
         };

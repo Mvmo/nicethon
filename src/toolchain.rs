@@ -1,6 +1,6 @@
-// Toolchain: CPython from python-build-standalone and zig as the C compiler.
-// Both are downloaded on first use into ~/.nicethon (or $NICETHON_HOME) and
-// shared by all projects.
+//! Toolchain: CPython from python-build-standalone and zig as the C compiler.
+//! Both are downloaded on first use into ~/.nicethon (or $NICETHON_HOME) and
+//! shared by all projects.
 
 use std::fmt::Display;
 use std::fs;
@@ -21,7 +21,8 @@ pub fn home() -> PathBuf {
     if let Some(home) = std::env::var_os("NICETHON_HOME") {
         return PathBuf::from(home);
     }
-    let user = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap_or_else(|| fail("cannot find the home directory, set NICETHON_HOME"));
+    let user = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .unwrap_or_else(|| fail("cannot find the home directory, set NICETHON_HOME"));
     PathBuf::from(user).join(".nicethon")
 }
 
@@ -79,8 +80,16 @@ pub fn python_version(minor: &str) -> Result<String, String> {
     }
     let prefix = format!("{minor}.");
     let suffix = format!("+{PYTHON_RELEASE}");
-    let matches = |name: &str| name.starts_with(&prefix) && name.ends_with(&suffix) && name[prefix.len()..name.len() - suffix.len()].bytes().all(|b| b.is_ascii_digit());
-    let installed = fs::read_dir(home().join("python")).into_iter().flatten().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned());
+    let matches = |name: &str| {
+        name.starts_with(&prefix)
+            && name.ends_with(&suffix)
+            && name[prefix.len()..name.len() - suffix.len()].bytes().all(|b| b.is_ascii_digit())
+    };
+    let installed = fs::read_dir(home().join("python"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned());
     if let Some(version) = installed.filter(|name| matches(name)).max() {
         return Ok(version);
     }
@@ -100,10 +109,16 @@ pub fn python(version: &str) -> Result<PathBuf, String> {
         let release = version.split_once('+').map_or(PYTHON_RELEASE, |(_, release)| release);
         let name = asset(version);
         let sums = checksums(release)?;
-        let expected = sums.lines().find_map(|line| line.strip_suffix(&format!("  {name}"))).ok_or_else(|| format!("no python build {name}"))?;
+        let expected = sums
+            .lines()
+            .find_map(|line| line.strip_suffix(&format!("  {name}")))
+            .ok_or_else(|| format!("no python build {name}"))?;
         eprintln!("installing python {version}");
         let archive = home().join("downloads").join(&name);
-        let bytes = download(&format!("https://github.com/astral-sh/python-build-standalone/releases/download/{release}/{name}"), &archive)?;
+        let bytes = download(
+            &format!("https://github.com/astral-sh/python-build-standalone/releases/download/{release}/{name}"),
+            &archive,
+        )?;
         if sha256(&bytes) != expected {
             return Err(format!("checksum mismatch for {name}"));
         }
@@ -130,8 +145,12 @@ fn zig() -> Result<PathBuf, String> {
         eprintln!("installing zig {ZIG_VERSION} (the C compiler)");
         let partial = home().join("zig").join(format!("{ZIG_VERSION}.partial"));
         let _ = fs::remove_dir_all(&partial);
-        let pip = ["-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--only-binary", ":all:", "--target"];
-        run(Command::new(default_python()?).args(pip).arg(&partial).arg(format!("ziglang=={ZIG_VERSION}")), "pip install ziglang")?;
+        let pip =
+            ["-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--only-binary", ":all:", "--target"];
+        run(
+            Command::new(default_python()?).args(pip).arg(&partial).arg(format!("ziglang=={ZIG_VERSION}")),
+            "pip install ziglang",
+        )?;
         fs::rename(&partial, &dir).map_err(|error| error.to_string())?;
     }
     Ok(executable)
@@ -140,7 +159,9 @@ fn zig() -> Result<PathBuf, String> {
 // Compiles generated C into an extension module for the given python and
 // returns the module's path.
 pub fn compile(python: &Path, c_path: &Path, module: &str, release: bool) -> Result<PathBuf, String> {
-    let script = "import sys, sysconfig; print(sysconfig.get_paths()['include']); print(sysconfig.get_config_var('EXT_SUFFIX')); print(sys.base_prefix); print(f'python{sys.version_info[0]}{sys.version_info[1]}')";
+    let script = "import sys, sysconfig; print(sysconfig.get_paths()['include']); \
+                  print(sysconfig.get_config_var('EXT_SUFFIX')); print(sys.base_prefix); \
+                  print(f'python{sys.version_info[0]}{sys.version_info[1]}')";
     let info = run(Command::new(python).args(["-c", script]), "python")?;
     let [include, suffix, base, library] = info.lines().collect::<Vec<_>>()[..] else {
         return Err(format!("unexpected sysconfig output from {}", python.display()));
@@ -153,7 +174,9 @@ pub fn compile(python: &Path, c_path: &Path, module: &str, release: bool) -> Res
     match std::env::consts::OS {
         // Python symbols resolve when the interpreter loads the module.
         "macos" => _ = zig.args(["-fPIC", "-undefined", "dynamic_lookup"]),
-        "windows" => _ = zig.args(["-target", "x86_64-windows-gnu"]).arg(format!("-L{base}/libs")).arg(format!("-l{library}")),
+        "windows" => {
+            _ = zig.args(["-target", "x86_64-windows-gnu"]).arg(format!("-L{base}/libs")).arg(format!("-l{library}"))
+        }
         _ => _ = zig.arg("-fPIC"),
     }
     zig.arg(c_path).arg("-o").arg(&output);
@@ -163,16 +186,17 @@ pub fn compile(python: &Path, c_path: &Path, module: &str, release: bool) -> Res
 
 fn sha256(data: &[u8]) -> String {
     const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98,
+        0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+        0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8,
+        0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819,
+        0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+        0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
     ];
-    let mut state: [u32; 8] = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+    let mut state: [u32; 8] =
+        [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
     let mut message = data.to_vec();
     message.push(0x80);
     while message.len() % 64 != 56 {
@@ -193,7 +217,11 @@ fn sha256(data: &[u8]) -> String {
         let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = state;
         for i in 0..64 {
             let choice = (e & f) ^ (!e & g);
-            let first = h.wrapping_add(e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25)).wrapping_add(choice).wrapping_add(K[i]).wrapping_add(words[i]);
+            let first = h
+                .wrapping_add(e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25))
+                .wrapping_add(choice)
+                .wrapping_add(K[i])
+                .wrapping_add(words[i]);
             let majority = (a & b) ^ (a & c) ^ (b & c);
             let second = (a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22)).wrapping_add(majority);
             (h, g, f, e, d, c, b, a) = (g, f, e, d.wrapping_add(first), c, b, a, first.wrapping_add(second));

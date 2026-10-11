@@ -109,6 +109,10 @@ struct Gen<'a> {
     f: Func,
 }
 
+// Python calls functions and lambdas through a vectorcall entry with these parameters.
+const ENTRY_PARAMS: &str = "PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames";
+const ENTRY_TYPES: &str = "PyObject *, PyObject *const *, Py_ssize_t, PyObject *";
+
 fn c_type(repr: Repr) -> &'static str {
     match repr {
         Repr::I64 => "int64_t",
@@ -170,7 +174,11 @@ fn float_literal(value: f64) -> String {
     if value.is_nan() {
         "NAN".into()
     } else if value.is_infinite() {
-        if value > 0.0 { "INFINITY".into() } else { "(-INFINITY)".into() }
+        if value > 0.0 {
+            "INFINITY".into()
+        } else {
+            "(-INFINITY)".into()
+        }
     } else {
         format!("{value:?}")
     }
@@ -243,7 +251,8 @@ impl<'a> Gen<'a> {
     }
 
     fn release_copy(&mut self, mark: usize) {
-        let clears: Vec<String> = self.f.live[mark.min(self.f.live.len())..].iter().map(|name| format!("Py_CLEAR({name});")).collect();
+        let clears: Vec<String> =
+            self.f.live[mark.min(self.f.live.len())..].iter().map(|name| format!("Py_CLEAR({name});")).collect();
         if !clears.is_empty() {
             self.emit(clears.join(" "));
         }
@@ -317,7 +326,10 @@ impl<'a> Gen<'a> {
                 DefKind::Variant { parent, .. } => parent,
                 _ => def,
             };
-            eprintln!("error: {} uses itself with an ever growing type, this cannot be compiled to separate copies per type", self.p.defs[owner].name);
+            eprintln!(
+                "error: {} uses itself with an ever growing type, this cannot be compiled to separate copies per type",
+                self.p.defs[owner].name
+            );
             std::process::exit(1);
         }
     }
@@ -428,7 +440,8 @@ impl<'a> Gen<'a> {
         if fields.is_empty() {
             return format!("U{record}");
         }
-        let stored: Vec<String> = values.iter().zip(fields).map(|(value, field)| self.stored(value, &field.ty.subst(args))).collect();
+        let stored: Vec<String> =
+            values.iter().zip(fields).map(|(value, field)| self.stored(value, &field.ty.subst(args))).collect();
         let object = self.call(Repr::Obj, format!("nt_record_alloc((PyTypeObject *)&T{record})"));
         for (index, (value, field)) in stored.iter().zip(fields).enumerate() {
             let target = format!("((S{record} *){object})->f{index}");
@@ -443,7 +456,11 @@ impl<'a> Gen<'a> {
 
     // Converts a value to its storage representation (boxes options).
     fn stored(&mut self, value: &str, ty: &Ty) -> String {
-        if self.repr(ty).is_option() { self.box_value(value, ty) } else { value.to_string() }
+        if self.repr(ty).is_option() {
+            self.box_value(value, ty)
+        } else {
+            value.to_string()
+        }
     }
 
     // Some(payload) or None, payload in the representation of T.
@@ -489,7 +506,11 @@ impl<'a> Gen<'a> {
             Repr::Bool => format!("({value} ? Py_True : Py_False)"),
             repr => {
                 let args = self.owner_args(ty);
-                let (present, payload) = if repr == Repr::OptObj { (value.to_string(), value.to_string()) } else { (format!("{value}.tag"), format!("{value}.value")) };
+                let (present, payload) = if repr == Repr::OptObj {
+                    (value.to_string(), value.to_string())
+                } else {
+                    (format!("{value}.tag"), format!("{value}.value"))
+                };
                 let result = self.temp(Repr::Obj);
                 self.emit(format!("if ({present}) {{"));
                 let some = self.make_record(self.some, &args, &[payload]);
@@ -504,7 +525,10 @@ impl<'a> Gen<'a> {
     }
 
     fn unbox(&mut self, value: &str, repr: Repr) -> String {
-        let some = |payload: &str, ctype: &str| format!("(NT_RECORD({value})->field_count ? ({ctype}){{((nt_{payload} *){value})->value, 1}} : ({ctype}){{0, 0}})");
+        let some = |payload: &str, ctype: &str| {
+            let present = format!("({ctype}){{((nt_{payload} *){value})->value, 1}}");
+            format!("(NT_RECORD({value})->field_count ? {present} : ({ctype}){{0, 0}})")
+        };
         match repr {
             Repr::Obj => value.to_string(),
             Repr::Unit => "0".into(),
@@ -548,7 +572,10 @@ impl<'a> Gen<'a> {
             return value.to_string();
         }
         let (spec, display) = (self.spec(&resolved), self.show(&resolved));
-        let converted = self.call(Repr::Obj, format!("nt_from_py({value}, {}, {}, {})", c_string(&spec), c_string(&display), c_string(context)));
+        let converted = self.call(
+            Repr::Obj,
+            format!("nt_from_py({value}, {}, {}, {})", c_string(&spec), c_string(&display), c_string(context)),
+        );
         let repr = self.repr_of(&resolved);
         self.unbox(&converted, repr)
     }
@@ -561,7 +588,11 @@ impl<'a> Gen<'a> {
 
     fn local_repr(&self, local: usize) -> Repr {
         let info = &self.body().locals[local];
-        if info.cell { Repr::Obj } else { self.repr(&info.ty) }
+        if info.cell {
+            Repr::Obj
+        } else {
+            self.repr(&info.ty)
+        }
     }
 
     fn declare_local(&mut self, local: usize) {
@@ -575,7 +606,11 @@ impl<'a> Gen<'a> {
         if info.cell {
             return self.unbox(&format!("PyCell_GET(v{local})"), repr);
         }
-        if repr == Repr::Unit { "0".into() } else { format!("v{local}") }
+        if repr == Repr::Unit {
+            "0".into()
+        } else {
+            format!("v{local}")
+        }
     }
 
     fn write_local(&mut self, local: usize, value: &str, ty: &Ty, fresh: bool) {
@@ -602,7 +637,14 @@ impl<'a> Gen<'a> {
 
     // Functions:
 
-    fn function(&mut self, header: String, trace: &str, func: Func, setup: impl FnOnce(&mut Self), value: Option<&Expr>) {
+    fn function(
+        &mut self,
+        header: String,
+        trace: &str,
+        func: Func,
+        setup: impl FnOnce(&mut Self),
+        value: Option<&Expr>,
+    ) {
         let saved = std::mem::take(&mut self.f);
         self.f = Func { error: "error".into(), ..func };
         let (ret, module) = (self.f.ret.clone(), self.f.module);
@@ -626,7 +668,8 @@ impl<'a> Gen<'a> {
             Ret::Native(ty) => self.repr(ty),
             Ret::Boxed(_) => Repr::Obj,
         };
-        let mut text = format!("{header} {{\n    int nt_lineno = 0;\n    {} ret = {};\n", c_type(ret_repr), zero(ret_repr));
+        let mut text =
+            format!("{header} {{\n    int nt_lineno = 0;\n    {} ret = {};\n", c_type(ret_repr), zero(ret_repr));
         let mut cleanup = String::new();
         for (name, repr) in &self.f.vars {
             writeln!(text, "    {} {name} = {};", c_type(*repr), zero(*repr)).unwrap();
@@ -636,7 +679,13 @@ impl<'a> Gen<'a> {
         }
         text.push_str(&self.f.out);
         let file = &self.names[module];
-        write!(text, "done:\n{cleanup}    return ret;\nerror:\n    nt_traceback({}, {}, nt_lineno);\n{cleanup}", c_string(trace), c_string(file)).unwrap();
+        write!(
+            text,
+            "done:\n{cleanup}    return ret;\nerror:\n    nt_traceback({}, {}, nt_lineno);\n{cleanup}",
+            c_string(trace),
+            c_string(file)
+        )
+        .unwrap();
         if ret_repr.owned() {
             text.push_str("    Py_XDECREF(ret);\n");
         }
@@ -710,7 +759,8 @@ impl<'a> Gen<'a> {
         let sig = self.p.sig(*def);
         let concrete = |ty: &Ty| self.repr_of(&self.p.resolve(ty).subst(targs));
         let ret = if sig.is_async { Repr::Obj } else { concrete(&sig.ret) };
-        let params: Vec<String> = sig.params.iter().enumerate().map(|(i, p)| format!("{} a{i}", c_type(concrete(&p.ty)))).collect();
+        let params: Vec<String> =
+            sig.params.iter().enumerate().map(|(i, p)| format!("{} a{i}", c_type(concrete(&p.ty)))).collect();
         let params = if params.is_empty() { "void".into() } else { params.join(", ") };
         format!("static {} {}({params})", c_type(ret), self.symbol(instance))
     }
@@ -723,13 +773,21 @@ impl<'a> Gen<'a> {
         let sig = p.sig(def);
         let module = p.defs[def].module;
         let header = self.native_header(instance);
-        let params: Vec<(usize, Ty)> = body.params.iter().zip(&sig.params).map(|(local, p)| (*local, p.ty.clone())).collect();
+        let params: Vec<(usize, Ty)> =
+            body.params.iter().zip(&sig.params).map(|(local, p)| (*local, p.ty.clone())).collect();
         let bind_params = |gen: &mut Self| {
             for (i, (local, ty)) in params.iter().enumerate() {
                 gen.write_local(*local, &format!("a{i}"), ty, true);
             }
         };
-        let func = Func { ret: Ret::Native(sig.ret.clone()), body: Some(index), module, targs, instance, ..Default::default() };
+        let func = Func {
+            ret: Ret::Native(sig.ret.clone()),
+            body: Some(index),
+            module,
+            targs,
+            instance,
+            ..Default::default()
+        };
         if sig.is_async {
             self.coroutine(func, header, bind_params);
         } else {
@@ -751,7 +809,8 @@ impl<'a> Gen<'a> {
     }
 
     fn native_signature(&self, name: &str, params: &[Ty], ret: &Ty) -> String {
-        let params: String = params.iter().enumerate().map(|(i, ty)| format!(", {} a{i}", c_type(self.repr_of(ty)))).collect();
+        let params: String =
+            params.iter().enumerate().map(|(i, ty)| format!(", {} a{i}", c_type(self.repr_of(ty)))).collect();
         format!("static {} {name}(PyObject *self{params})", c_type(self.repr_of(ret)))
     }
 
@@ -785,21 +844,43 @@ impl<'a> Gen<'a> {
                 gen.write_local(param, &format!("a{position}"), &ty, true);
             }
         };
-        let func = Func { ret: Ret::Native(info.ret.clone()), body: Some(index), owner: lambda + 1, module, targs: targs.clone(), instance, ..Default::default() };
+        let func = Func {
+            ret: Ret::Native(info.ret.clone()),
+            body: Some(index),
+            owner: lambda + 1,
+            module,
+            targs: targs.clone(),
+            instance,
+            ..Default::default()
+        };
         self.function(self.native_signature(&native, &params, &ret), "<lambda>", func, setup, Some(&info.body));
         let names: Vec<String> = info.params.iter().map(|&param| p.fns[index].locals[param].name.clone()).collect();
-        let header = format!("static PyObject *L{instance}_{lambda}(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)");
+        let header = format!("static PyObject *L{instance}_{lambda}({ENTRY_PARAMS})");
         let entry = |gen: &mut Self| {
             let count = params.len();
             let fail = gen.fail();
-            gen.emit(format!("if (nargs != {count} || kwnames) {{ PyErr_SetString(PyExc_TypeError, \"lambda takes {count} positional arguments\"); {fail} }}"));
-            let values: Vec<String> = params.iter().zip(&names).enumerate().map(|(i, (ty, name))| gen.checked_value(&format!("args[{i}]"), ty, name)).collect();
+            let message = format!("\"lambda takes {count} positional arguments\"");
+            gen.emit(format!(
+                "if (nargs != {count} || kwnames) {{ PyErr_SetString(PyExc_TypeError, {message}); {fail} }}"
+            ));
+            let values: Vec<String> = params
+                .iter()
+                .zip(&names)
+                .enumerate()
+                .map(|(i, (ty, name))| gen.checked_value(&format!("args[{i}]"), ty, name))
+                .collect();
             let arguments: String = values.iter().map(|v| format!(", {v}")).collect();
             let result = gen.call(gen.repr_of(&ret), format!("{native}(self{arguments})"));
             let boxed = gen.box_value(&result, &ret);
             gen.emit(format!("ret = {boxed}; Py_INCREF(ret);"));
         };
-        self.function(header, "<lambda>", Func { ret: Ret::Boxed(Ty::Dyn), module, targs, instance, ..Default::default() }, entry, None);
+        self.function(
+            header,
+            "<lambda>",
+            Func { ret: Ret::Boxed(Ty::Dyn), module, targs, instance, ..Default::default() },
+            entry,
+            None,
+        );
     }
 
     fn wrapper(&mut self, instance: usize) {
@@ -809,11 +890,14 @@ impl<'a> Gen<'a> {
         let name = p.defs[def].name.clone();
         let count = sig.params.len();
         let names: Vec<String> = sig.params.iter().map(|p| c_string(&p.name)).collect();
-        let header = format!("static PyObject *W{instance}(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)");
+        let header = format!("static PyObject *W{instance}({ENTRY_PARAMS})");
         let module = p.defs[def].module;
         let ret_ty = if sig.is_async { Ty::Dyn } else { sig.ret.clone() };
         let setup = |gen: &mut Self| {
-            gen.emit(format!("static const char *const names[] = {{{}NULL}};", names.iter().map(|n| format!("{n}, ")).collect::<String>()));
+            gen.emit(format!(
+                "static const char *const names[] = {{{}NULL}};",
+                names.iter().map(|n| format!("{n}, ")).collect::<String>()
+            ));
             gen.emit(format!("PyObject *slots[{}] = {{0}};", count + 1));
             let fail = gen.fail();
             gen.emit(format!("if (nt_args(args, nargs, kwnames, names, {count}, slots) < 0) {fail}"));
@@ -831,7 +915,10 @@ impl<'a> Gen<'a> {
                     }
                     None => {
                         let missing = format!("missing argument '{}'", param.name);
-                        gen.emit(format!("if (!slots[{i}]) {{ PyErr_SetString(PyExc_TypeError, {}); {fail} }}", c_string(&missing)));
+                        gen.emit(format!(
+                            "if (!slots[{i}]) {{ PyErr_SetString(PyExc_TypeError, {}); {fail} }}",
+                            c_string(&missing)
+                        ));
                         gen.emit("{");
                     }
                 }
@@ -845,9 +932,22 @@ impl<'a> Gen<'a> {
             let boxed = gen.python_value(&result, &ret_ty);
             gen.emit(format!("ret = {boxed}; Py_INCREF(ret);"));
         };
-        self.function(header, &name, Func { ret: Ret::Boxed(Ty::Dyn), module, targs, ..Default::default() }, setup, None);
+        self.function(
+            header,
+            &name,
+            Func { ret: Ret::Boxed(Ty::Dyn), module, targs, ..Default::default() },
+            setup,
+            None,
+        );
         let arguments: Vec<String> = (0..count).map(|i| format!("a{i}")).collect();
-        writeln!(self.code, "{} {{\n    return {}({});\n}}\n", self.adapter_header(instance), self.symbol(instance), arguments.join(", ")).unwrap();
+        writeln!(
+            self.code,
+            "{} {{\n    return {}({});\n}}\n",
+            self.adapter_header(instance),
+            self.symbol(instance),
+            arguments.join(", ")
+        )
+        .unwrap();
     }
 
     // NF adapts a named function to the closure calling convention.
@@ -869,7 +969,12 @@ impl<'a> Gen<'a> {
         }
         let targs: Vec<Ty> = targs.iter().map(|t| self.resolve(t)).collect();
         let instance = self.instance(def, &targs);
-        let values: Vec<String> = raw.iter().zip(args).zip(&sig.params).map(|((value, arg), param)| self.coerce(value, &arg.ty, &param.ty.subst(&targs))).collect();
+        let values: Vec<String> = raw
+            .iter()
+            .zip(args)
+            .zip(&sig.params)
+            .map(|((value, arg), param)| self.coerce(value, &arg.ty, &param.ty.subst(&targs)))
+            .collect();
         let call = format!("{}({})", self.symbol(instance), values.join(", "));
         if sig.is_async {
             return self.call(Repr::Obj, call);
@@ -905,7 +1010,12 @@ impl<'a> Gen<'a> {
             ("nt_List_push", Some(Repr::I64)) => format!("nt_list_append_i64({}, {})", raw[0], raw[1]),
             ("nt_List_push", Some(Repr::F64)) => format!("nt_list_append_f64({}, {})", raw[0], raw[1]),
             _ => {
-                let values: Vec<String> = raw.iter().zip(args).zip(&params).map(|((value, arg), param)| self.coerce(value, &arg.ty, param)).collect();
+                let values: Vec<String> = raw
+                    .iter()
+                    .zip(args)
+                    .zip(&params)
+                    .map(|((value, arg), param)| self.coerce(value, &arg.ty, param))
+                    .collect();
                 format!("{symbol}({})", values.join(", "))
             }
         };
@@ -988,15 +1098,28 @@ impl<'a> Gen<'a> {
         let mut text = frame;
         writeln!(text, "static void C{def}(void *pointer) {{\n    FR{def} *frame = pointer;\n{clear}}}\n").unwrap();
         text.push_str(&defines);
-        writeln!(text, "static PyObject *A{def}(void *pointer, PyObject *sent, int *yielded) {{\n    FR{def} *frame = pointer;\n    int nt_lineno = 0;\n    PyObject *ret = NULL;").unwrap();
+        writeln!(text, "static PyObject *A{def}(void *pointer, PyObject *sent, int *yielded) {{").unwrap();
+        writeln!(text, "    FR{def} *frame = pointer;\n    int nt_lineno = 0;\n    PyObject *ret = NULL;").unwrap();
         text.push_str("    switch (frame->state) {\n    case 0: break;\n");
         for resume in 1..=awaits {
             writeln!(text, "    case {resume}: goto resume_{resume};").unwrap();
         }
-        text.push_str("    default: PyErr_SetString(PyExc_RuntimeError, \"coroutine already finished\"); return NULL;\n    }\n");
+        text.push_str(
+            "    default: PyErr_SetString(PyExc_RuntimeError, \"coroutine already finished\"); return NULL;\n    }\n",
+        );
         text.push_str(&self.f.out);
-        write!(text, "done:\n    frame->state = -1;\n    return ret;\nerror:\n    nt_traceback({}, {}, nt_lineno);\n    frame->state = -1;\n    Py_XDECREF(ret);\n    return NULL;\n}}\n\n", c_string(&name), c_string(&self.names[module])).unwrap();
-        writeln!(text, "{header} {{\n    FR{def} *frame = PyMem_Calloc(1, sizeof(FR{def}));\n    int nt_lineno = 0;\n    if (!frame) return PyErr_NoMemory();\n{param_code}    return nt_coroutine_new(A{def}, C{def}, frame);\nerror:\n    C{def}(frame);\n    PyMem_Free(frame);\n    return NULL;\n}}").unwrap();
+        let (c_name, c_file) = (c_string(&name), c_string(&self.names[module]));
+        text.push_str("done:\n    frame->state = -1;\n    return ret;\n");
+        writeln!(text, "error:\n    nt_traceback({c_name}, {c_file}, nt_lineno);\n    frame->state = -1;").unwrap();
+        text.push_str("    Py_XDECREF(ret);\n    return NULL;\n}\n\n");
+        writeln!(text, "{header} {{\n    FR{def} *frame = PyMem_Calloc(1, sizeof(FR{def}));\n    int nt_lineno = 0;")
+            .unwrap();
+        writeln!(
+            text,
+            "    if (!frame) return PyErr_NoMemory();\n{param_code}    return nt_coroutine_new(A{def}, C{def}, frame);"
+        )
+        .unwrap();
+        writeln!(text, "error:\n    C{def}(frame);\n    PyMem_Free(frame);\n    return NULL;\n}}").unwrap();
         text.push_str(&undefines);
         text.push('\n');
         self.code.push_str(&text);
@@ -1056,7 +1179,9 @@ impl<'a> Gen<'a> {
         let ty = self.resolve(&e.ty);
         let repr = self.repr_of(&ty);
         match &e.kind {
-            ExprKind::Int(value) if ty == Ty::BigInt => self.call(Repr::Obj, format!("PyLong_FromLongLong(INT64_C({value}))")),
+            ExprKind::Int(value) if ty == Ty::BigInt => {
+                self.call(Repr::Obj, format!("PyLong_FromLongLong(INT64_C({value}))"))
+            }
             ExprKind::Int(value) => format!("INT64_C({value})"),
             ExprKind::Float(value) => float_literal(*value),
             ExprKind::Bool(value) => (*value as i32).to_string(),
@@ -1090,26 +1215,37 @@ impl<'a> Gen<'a> {
                     };
                     self.emit(format!("PyTuple_SET_ITEM({tuple}, {position}, Py_NewRef({item}));"));
                 }
-                self.call(Repr::Obj, format!("nt_closure_new(L{instance}_{lambda}, (void *)N{instance}_{lambda}, {tuple}, \"<lambda>\")"))
+                self.call(
+                    Repr::Obj,
+                    format!(
+                        "nt_closure_new(L{instance}_{lambda}, (void *)N{instance}_{lambda}, {tuple}, \"<lambda>\")"
+                    ),
+                )
             }
             ExprKind::Call(def, targs, args) => self.call_function(*def, targs, args, &ty),
             ExprKind::CallValue(function, args) => {
                 let Ty::Fn(params, ret) = self.resolve(&function.ty) else { unreachable!() };
                 let function = self.expr(function);
-                let values: Vec<String> = args.iter().zip(&params).map(|(arg, param)| {
-                    let value = self.expr(arg);
-                    self.coerce(&value, &arg.ty, param)
-                }).collect();
+                let values: Vec<String> = args
+                    .iter()
+                    .zip(&params)
+                    .map(|(arg, param)| {
+                        let value = self.expr(arg);
+                        self.coerce(&value, &arg.ty, param)
+                    })
+                    .collect();
                 let ret_repr = self.repr(&ret);
                 let result = self.temp(ret_repr);
                 let pointer: String = params.iter().map(|p| format!(", {}", c_type(self.repr(p)))).collect();
                 let arguments: String = values.iter().map(|v| format!(", {v}")).collect();
                 // Nicethon closures are called directly, other callables through Python.
                 self.emit(format!("if (NT_NATIVE({function})) {{"));
-                self.emit(format!("{result} = (({} (*)(PyObject *{pointer}))NT_NATIVE({function}))(((nt_Closure *){function})->captures{arguments});", c_type(ret_repr)));
+                let native = format!("(({} (*)(PyObject *{pointer}))NT_NATIVE({function}))", c_type(ret_repr));
+                self.emit(format!("{result} = {native}(((nt_Closure *){function})->captures{arguments});"));
                 self.check_result(&result, ret_repr);
                 self.emit("} else {");
-                let boxed: Vec<String> = values.iter().zip(&params).map(|(value, param)| self.box_value(value, param)).collect();
+                let boxed: Vec<String> =
+                    values.iter().zip(&params).map(|(value, param)| self.box_value(value, param)).collect();
                 let slow = self.vectorcall(&function, &boxed, None);
                 let converted = self.checked_value(&slow, &ret, "");
                 self.assign(&result, &converted, ret_repr);
@@ -1136,7 +1272,10 @@ impl<'a> Gen<'a> {
             }
             ExprKind::Super(global, this) => {
                 let this = self.read_local(*this);
-                self.call(Repr::Obj, format!("PyObject_CallFunctionObjArgs((PyObject *)&PySuper_Type, G{global}, {this}, NULL)"))
+                self.call(
+                    Repr::Obj,
+                    format!("PyObject_CallFunctionObjArgs((PyObject *)&PySuper_Type, G{global}, {this}, NULL)"),
+                )
             }
             ExprKind::ToDyn(inner) => {
                 let value = self.expr(inner);
@@ -1163,10 +1302,14 @@ impl<'a> Gen<'a> {
             ExprKind::Construct(def, args) => {
                 let owner_args = self.owner_args(&ty);
                 let p = self.p;
-                let values: Vec<String> = args.iter().zip(p.fields(*def)).map(|(arg, field)| {
-                    let value = self.expr(arg);
-                    self.coerce(&value, &arg.ty, &field.ty.subst(&owner_args))
-                }).collect();
+                let values: Vec<String> = args
+                    .iter()
+                    .zip(p.fields(*def))
+                    .map(|(arg, field)| {
+                        let value = self.expr(arg);
+                        self.coerce(&value, &arg.ty, &field.ty.subst(&owner_args))
+                    })
+                    .collect();
                 self.make_record(*def, &owner_args, &values)
             }
             ExprKind::Field(object, def, index) => {
@@ -1178,16 +1321,21 @@ impl<'a> Gen<'a> {
                 let record = self.record(*def, &args);
                 let object = self.expr(object);
                 let p = self.p;
-                let values: Vec<(usize, String, Repr)> = updates.iter().map(|(index, value)| {
-                    let field_ty = p.fields(*def)[*index].ty.subst(&args);
-                    let result = self.expr(value);
-                    let converted = self.coerce(&result, &value.ty, &field_ty);
-                    (*index, self.stored(&converted, &field_ty), self.storage(&field_ty))
-                }).collect();
+                let values: Vec<(usize, String, Repr)> = updates
+                    .iter()
+                    .map(|(index, value)| {
+                        let field_ty = p.fields(*def)[*index].ty.subst(&args);
+                        let result = self.expr(value);
+                        let converted = self.coerce(&result, &value.ty, &field_ty);
+                        (*index, self.stored(&converted, &field_ty), self.storage(&field_ty))
+                    })
+                    .collect();
                 let copy = self.call(Repr::Obj, format!("nt_record_copy({object})"));
                 for (index, value, repr) in values {
                     match repr {
-                        Repr::Obj => self.emit(format!("Py_SETREF(((S{record} *){copy})->f{index}, Py_NewRef({value}));")),
+                        Repr::Obj => {
+                            self.emit(format!("Py_SETREF(((S{record} *){copy})->f{index}, Py_NewRef({value}));"))
+                        }
                         Repr::Unit => {}
                         _ => self.emit(format!("((S{record} *){copy})->f{index} = {value};")),
                     }
@@ -1199,10 +1347,13 @@ impl<'a> Gen<'a> {
                 self.unbox(&format!("PyTuple_GET_ITEM({object}, {index})"), repr)
             }
             ExprKind::Tuple(items) => {
-                let values: Vec<String> = items.iter().map(|item| {
-                    let value = self.expr(item);
-                    self.box_value(&value, &item.ty)
-                }).collect();
+                let values: Vec<String> = items
+                    .iter()
+                    .map(|item| {
+                        let value = self.expr(item);
+                        self.box_value(&value, &item.ty)
+                    })
+                    .collect();
                 let tuple = self.call(Repr::Obj, format!("PyTuple_New({})", values.len()));
                 for (index, value) in values.iter().enumerate() {
                     self.emit(format!("PyTuple_SET_ITEM({tuple}, {index}, Py_NewRef({value}));"));
@@ -1229,7 +1380,8 @@ impl<'a> Gen<'a> {
                         Repr::Bool => "nt_list_append_bool",
                         _ => "nt_list_append",
                     };
-                    let value = if item_repr == Repr::Unit { "Py_None".to_string() } else { self.stored(&value, item_ty) };
+                    let value =
+                        if item_repr == Repr::Unit { "Py_None".to_string() } else { self.stored(&value, item_ty) };
                     self.check(&format!("{append}({list}, {value}) < 0"));
                 }
                 list
@@ -1308,10 +1460,13 @@ impl<'a> Gen<'a> {
                 }
             }
             ExprKind::Template(parts) => {
-                let values: Vec<String> = parts.iter().map(|part| {
-                    let value = self.expr(part);
-                    self.box_value(&value, &part.ty)
-                }).collect();
+                let values: Vec<String> = parts
+                    .iter()
+                    .map(|part| {
+                        let value = self.expr(part);
+                        self.box_value(&value, &part.ty)
+                    })
+                    .collect();
                 let argv = self.argv(&values);
                 self.call(Repr::Obj, format!("nt_template({}, {argv})", values.len()))
             }
@@ -1394,7 +1549,8 @@ impl<'a> Gen<'a> {
                 "0".into()
             }
             ExprKind::Break(value) => {
-                let target = self.f.loops.last().map(|l| (l.brk.clone(), l.result.clone(), l.mark, l.cleanups)).unwrap();
+                let target =
+                    self.f.loops.last().map(|l| (l.brk.clone(), l.result.clone(), l.mark, l.cleanups)).unwrap();
                 if let (Some(value), Some((result, result_ty))) = (value, &target.1) {
                     let computed = self.expr(value);
                     let computed = self.coerce(&computed, &value.ty, result_ty);
@@ -1433,7 +1589,11 @@ impl<'a> Gen<'a> {
                 let inner_ty = self.resolve(&inner.ty);
                 let value = self.expr(inner);
                 let args = self.owner_args(&inner_ty);
-                let (good, bad) = if matches!(inner_ty, Ty::Named(def, _) if def == self.result_type) { (self.ok, self.err) } else { (self.some, self.none) };
+                let (good, bad) = if matches!(inner_ty, Ty::Named(def, _) if def == self.result_type) {
+                    (self.ok, self.err)
+                } else {
+                    (self.some, self.none)
+                };
                 let inner_repr = self.repr(&inner_ty);
                 let failed = match inner_repr {
                     Repr::OptObj => format!("!{value}"),
@@ -1530,7 +1690,8 @@ impl<'a> Gen<'a> {
             Repr::Bool => "nt_list_get_bool",
             _ => "nt_list_get_obj",
         };
-        let result = self.call(if storage == Repr::Unit { Repr::Obj } else { storage }, format!("{getter}({list}, {index})"));
+        let result =
+            self.call(if storage == Repr::Unit { Repr::Obj } else { storage }, format!("{getter}({list}, {index})"));
         match repr {
             Repr::Unit => "0".into(),
             repr if repr.is_option() => self.unbox(&result, repr),
@@ -1563,7 +1724,8 @@ impl<'a> Gen<'a> {
 
     fn vectorcall(&mut self, function: &str, values: &[String], kwnames: Option<String>) -> String {
         let argv = self.argv(values);
-        let positional = values.len() - kwnames.as_ref().map_or(0, |k| self.kwnames[k[2..].parse::<usize>().unwrap()].len());
+        let positional =
+            values.len() - kwnames.as_ref().map_or(0, |k| self.kwnames[k[2..].parse::<usize>().unwrap()].len());
         let kwnames = kwnames.unwrap_or_else(|| "NULL".into());
         self.call(Repr::Obj, format!("PyObject_Vectorcall({function}, {argv}, {positional}, {kwnames})"))
     }
@@ -1624,7 +1786,9 @@ impl<'a> Gen<'a> {
                 PyIndexPart::Expr(value) => self.expr(value),
                 PyIndexPart::Ellipsis => "Py_Ellipsis".into(),
                 PyIndexPart::Slice(start, stop, step) => {
-                    let bound = |gen: &mut Self, value: &Option<Box<Expr>>| value.as_ref().map_or("Py_None".to_string(), |v| gen.expr(v));
+                    let bound = |gen: &mut Self, value: &Option<Box<Expr>>| {
+                        value.as_ref().map_or("Py_None".to_string(), |v| gen.expr(v))
+                    };
                     let (start, stop, step) = (bound(self, start), bound(self, stop), bound(self, step));
                     self.call(Repr::Obj, format!("PySlice_New({start}, {stop}, {step})"))
                 }
@@ -1702,7 +1866,9 @@ impl<'a> Gen<'a> {
                 };
                 let result = self.temp(Repr::I64);
                 let fail = self.fail();
-                self.emit(format!("if (__builtin_{builtin}_overflow({a}, {b}, &{result})) {{ nt_overflow(); {fail} }}"));
+                self.emit(format!(
+                    "if (__builtin_{builtin}_overflow({a}, {b}, &{result})) {{ nt_overflow(); {fail} }}"
+                ));
                 result
             }
             BinOp::Div => format!("((double){a} / (double){b})"),
@@ -1728,7 +1894,11 @@ impl<'a> Gen<'a> {
         }
         let extra = if op == BinOp::Pow { ", Py_None" } else { "" };
         let result = self.call(Repr::Obj, format!("{}({a}, {b}{extra})", py_number(op)));
-        if self.repr(ty) == Repr::Obj { result } else { self.unbox(&result, self.repr(ty)) }
+        if self.repr(ty) == Repr::Obj {
+            result
+        } else {
+            self.unbox(&result, self.repr(ty))
+        }
     }
 
     fn enter_loop(&mut self, brk: &str, cont: &str, result: Option<(String, Ty)>) {
@@ -1870,7 +2040,8 @@ impl<'a> Gen<'a> {
         self.region_temps(region);
         self.emit(format!("{exception} = PyErr_GetRaisedException();"));
         let fail = self.fail();
-        self.emit(format!("if (!nt_matches({exception}, NULL)) {{ PyErr_SetRaisedException({exception}); {exception} = NULL; {fail} }}"));
+        let rethrow = format!("PyErr_SetRaisedException({exception}); {exception} = NULL; {fail}");
+        self.emit(format!("if (!nt_matches({exception}, NULL)) {{ {rethrow} }}"));
         let error = self.call(Repr::Obj, format!("nt_make_pyerr({exception})"));
         let err = self.make_record(self.err, &args, &[error]);
         self.emit(format!("{result} = Py_NewRef({err});"));
@@ -1906,7 +2077,9 @@ impl<'a> Gen<'a> {
         let fail = self.fail();
         self.emit(format!("{outcome} = nt_with_exit({exit}, {exception});"));
         self.emit(format!("if (!{outcome}) {fail}"));
-        self.emit(format!("if (!PyObject_IsTrue({outcome})) {{ PyErr_SetRaisedException({exception}); {exception} = NULL; {fail} }}"));
+        self.emit(format!(
+            "if (!PyObject_IsTrue({outcome})) {{ PyErr_SetRaisedException({exception}); {exception} = NULL; {fail} }}"
+        ));
         self.emit(format!("{end}:;"));
     }
 
@@ -1931,7 +2104,11 @@ impl<'a> Gen<'a> {
             }
             PatKind::Variant(def, fields) if self.repr(&pattern.ty).is_option() => {
                 let repr = self.repr(&pattern.ty);
-                let (present, payload) = if repr == Repr::OptObj { (value.to_string(), value.to_string()) } else { (format!("{value}.tag"), format!("{value}.value")) };
+                let (present, payload) = if repr == Repr::OptObj {
+                    (value.to_string(), value.to_string())
+                } else {
+                    (format!("{value}.tag"), format!("{value}.value"))
+                };
                 let negate = if *def == self.some { "" } else { "!" };
                 self.emit(format!("if ({negate}{present}) {{"));
                 let items: Vec<(&Pattern, String)> = fields.iter().map(|(_, sub)| (sub, payload.clone())).collect();
@@ -1944,27 +2121,38 @@ impl<'a> Gen<'a> {
                 if test {
                     self.emit(format!("if (Py_IS_TYPE({value}, (PyTypeObject *)&T{record})) {{"));
                 }
-                let items: Vec<(&Pattern, String)> = fields.iter().map(|(index, sub)| (sub, self.field(value, *def, *index, &pattern.ty, &sub.ty))).collect();
+                let items: Vec<(&Pattern, String)> = fields
+                    .iter()
+                    .map(|(index, sub)| (sub, self.field(value, *def, *index, &pattern.ty, &sub.ty)))
+                    .collect();
                 self.pattern_list(&items, on_match);
                 if test {
                     self.emit("}");
                 }
             }
             PatKind::Tuple(items) => {
-                let values: Vec<(&Pattern, String)> = items.iter().enumerate().map(|(index, sub)| {
-                    let repr = self.repr(&sub.ty);
-                    (sub, self.unbox(&format!("PyTuple_GET_ITEM({value}, {index})"), repr))
-                }).collect();
+                let values: Vec<(&Pattern, String)> = items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, sub)| {
+                        let repr = self.repr(&sub.ty);
+                        (sub, self.unbox(&format!("PyTuple_GET_ITEM({value}, {index})"), repr))
+                    })
+                    .collect();
                 self.pattern_list(&values, on_match);
             }
             PatKind::List(items, rest) => {
                 let comparison = if *rest { ">=" } else { "==" };
                 self.emit(format!("if (nt_list_len({value}) {comparison} {}) {{", items.len()));
-                let values: Vec<(&Pattern, String)> = items.iter().enumerate().map(|(index, sub)| {
-                    let item = self.call(Repr::Obj, format!("nt_list_get_obj({value}, {index})"));
-                    let repr = self.repr(&sub.ty);
-                    (sub, self.unbox(&item, repr))
-                }).collect();
+                let values: Vec<(&Pattern, String)> = items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, sub)| {
+                        let item = self.call(Repr::Obj, format!("nt_list_get_obj({value}, {index})"));
+                        let repr = self.repr(&sub.ty);
+                        (sub, self.unbox(&item, repr))
+                    })
+                    .collect();
                 self.pattern_list(&values, on_match);
                 self.emit("}");
             }
@@ -2034,10 +2222,12 @@ impl<'a> Gen<'a> {
         }
         let mut decls = String::new();
         for (instance, (def, _)) in self.instances.iter().enumerate() {
-            writeln!(decls, "{};\n{};\nstatic PyObject *W{instance}(PyObject *, PyObject *const *, Py_ssize_t, PyObject *);\nstatic PyObject *V{instance};", self.native_header(instance), self.adapter_header(instance)).unwrap();
+            writeln!(decls, "{};\n{};", self.native_header(instance), self.adapter_header(instance)).unwrap();
+            writeln!(decls, "static PyObject *W{instance}({ENTRY_TYPES});\nstatic PyObject *V{instance};").unwrap();
             for lambda in 0..p.fns[self.bodies[def]].lambdas.len() {
                 let (params, ret) = self.lambda_types(instance, lambda);
-                writeln!(decls, "{};\nstatic PyObject *L{instance}_{lambda}(PyObject *, PyObject *const *, Py_ssize_t, PyObject *);", self.native_signature(&format!("N{instance}_{lambda}"), &params, &ret)).unwrap();
+                let native = self.native_signature(&format!("N{instance}_{lambda}"), &params, &ret);
+                writeln!(decls, "{native};\nstatic PyObject *L{instance}_{lambda}({ENTRY_TYPES});").unwrap();
             }
         }
         let ready = self.ready();
@@ -2070,10 +2260,21 @@ impl<'a> Gen<'a> {
                 write!(members, " {} f{position};", c_type(repr)).unwrap();
                 let name = field.name.clone().unwrap_or_default();
                 let spec = self.spec(&ty);
-                write!(descriptors, "{{{}, {}, offsetof(S{index}, f{position}), {}, {}}}, ", c_string(&name), kind(repr), c_string(&spec), c_string(&self.show(&ty))).unwrap();
+                write!(
+                    descriptors,
+                    "{{{}, {}, offsetof(S{index}, f{position}), {}, {}}}, ",
+                    c_string(&name),
+                    kind(repr),
+                    c_string(&spec),
+                    c_string(&self.show(&ty))
+                )
+                .unwrap();
             }
             let (qualname, enum_id) = match &info.kind {
-                DefKind::Variant { parent, .. } => (format!("{}.{}.{}", self.module, p.defs[*parent].name, info.name), self.enum_id(*parent, &args) as i64),
+                DefKind::Variant { parent, .. } => (
+                    format!("{}.{}.{}", self.module, p.defs[*parent].name, info.name),
+                    self.enum_id(*parent, &args) as i64,
+                ),
                 _ => (format!("{}.{}", self.module, info.name), -1),
             };
             writeln!(text, "typedef struct {{ PyObject_HEAD{members} }} S{index};").unwrap();
@@ -2084,24 +2285,44 @@ impl<'a> Gen<'a> {
                 writeln!(text, "static const nt_Field D{index}[] = {{{descriptors}}};").unwrap();
                 format!("D{index}")
             };
-            writeln!(text, "static nt_RecordType T{index} = NT_RECORD_TYPE({}, {}, S{index}, {descriptor}, {}, {enum_id});", c_string(&qualname), c_string(&info.name), fields.len()).unwrap();
+            writeln!(
+                text,
+                "static nt_RecordType T{index} = NT_RECORD_TYPE({}, {}, S{index}, {descriptor}, {}, {enum_id});",
+                c_string(&qualname),
+                c_string(&info.name),
+                fields.len()
+            )
+            .unwrap();
             index += 1;
         }
         text
     }
 
     fn ready(&self) -> String {
-        let mut text = format!("static PyTypeObject *nt_type_table[{}];\n\nstatic int nt_ready(void) {{\n", self.records.len() + 1);
+        let mut text = format!(
+            "static PyTypeObject *nt_type_table[{}];\n\nstatic int nt_ready(void) {{\n",
+            self.records.len() + 1
+        );
         for (index, (def, _)) in self.records.iter().enumerate() {
-            writeln!(text, "    if (PyType_Ready((PyTypeObject *)&T{index}) < 0) return -1;\n    nt_type_table[{index}] = (PyTypeObject *)&T{index};").unwrap();
+            writeln!(text, "    if (PyType_Ready((PyTypeObject *)&T{index}) < 0) return -1;").unwrap();
+            writeln!(text, "    nt_type_table[{index}] = (PyTypeObject *)&T{index};").unwrap();
             if self.p.fields(*def).is_empty() {
                 writeln!(text, "    if (!(U{index} = nt_record_alloc((PyTypeObject *)&T{index}))) return -1;").unwrap();
             }
         }
-        writeln!(text, "    nt_types = nt_type_table;\n    nt_pyerr_type = (PyTypeObject *)&T{};", self.record_index[&(self.pyerr, vec![])]).unwrap();
+        writeln!(
+            text,
+            "    nt_types = nt_type_table;\n    nt_pyerr_type = (PyTypeObject *)&T{};",
+            self.record_index[&(self.pyerr, vec![])]
+        )
+        .unwrap();
         for (instance, (def, _)) in self.instances.iter().enumerate() {
             let name = c_string(&self.p.defs[*def].name);
-            writeln!(text, "    if (!(V{instance} = nt_closure_new(W{instance}, (void *)NF{instance}, NULL, {name}))) return -1;").unwrap();
+            writeln!(
+                text,
+                "    if (!(V{instance} = nt_closure_new(W{instance}, (void *)NF{instance}, NULL, {name}))) return -1;"
+            )
+            .unwrap();
         }
         text.push_str("    return 0;\n}\n");
         text
@@ -2126,7 +2347,9 @@ impl<'a> Gen<'a> {
                 gen.set_line(global.pos);
                 gen.f.module = global.module;
                 let value = match &global.init {
-                    GlobalInit::Import(name) => gen.call(Repr::Obj, format!("PyImport_ImportModule({})", c_string(name))),
+                    GlobalInit::Import(name) => {
+                        gen.call(Repr::Obj, format!("PyImport_ImportModule({})", c_string(name)))
+                    }
                     GlobalInit::Attr(module, name) => {
                         let attr = gen.string(name);
                         let raw = gen.call(Repr::Obj, format!("PyObject_GetAttr(G{module}, {attr})"));
@@ -2162,21 +2385,38 @@ impl<'a> Gen<'a> {
         let mut strings_setup = String::new();
         self.function(header, "<module>", Func { module: entry, ..Default::default() }, setup, None);
         for (index, text) in self.strings.iter().enumerate() {
-            writeln!(strings_setup, "    K{index} = PyUnicode_InternFromString({});\n    if (!K{index}) return -1;", c_string(text)).unwrap();
+            writeln!(
+                strings_setup,
+                "    K{index} = PyUnicode_InternFromString({});\n    if (!K{index}) return -1;",
+                c_string(text)
+            )
+            .unwrap();
         }
         for (index, names) in self.kwnames.iter().enumerate() {
-            let items: Vec<String> = names.iter().map(|n| format!("PyUnicode_InternFromString({})", c_string(n))).collect();
-            writeln!(kwnames_setup, "    KW{index} = PyTuple_Pack({}, {});\n    if (!KW{index}) return -1;", items.len(), items.join(", ")).unwrap();
+            let items: Vec<String> =
+                names.iter().map(|n| format!("PyUnicode_InternFromString({})", c_string(n))).collect();
+            writeln!(
+                kwnames_setup,
+                "    KW{index} = PyTuple_Pack({}, {});\n    if (!KW{index}) return -1;",
+                items.len(),
+                items.join(", ")
+            )
+            .unwrap();
         }
         let module = self.module;
-        write!(
+        writeln!(self.code, "static int nt_constants(void) {{\n{strings_setup}{kwnames_setup}    return 0;\n}}\n")
+            .unwrap();
+        let name = c_string(module);
+        writeln!(
             self.code,
-            "static int nt_constants(void) {{\n{strings_setup}{kwnames_setup}    return 0;\n}}\n\n\
-             static struct PyModuleDef nt_module = {{PyModuleDef_HEAD_INIT, {}, NULL, -1, NULL}};\n\n\
-             PyMODINIT_FUNC PyInit_{module}(void) {{\n    PyObject *module = PyModule_Create(&nt_module);\n    if (!module) return NULL;\n    if (nt_constants() < 0 || nt_setup(module) < 0) {{\n        Py_DECREF(module);\n        return NULL;\n    }}\n    return module;\n}}\n",
-            c_string(module)
+            "static struct PyModuleDef nt_module = {{PyModuleDef_HEAD_INIT, {name}, NULL, -1, NULL}};\n"
         )
         .unwrap();
+        writeln!(self.code, "PyMODINIT_FUNC PyInit_{module}(void) {{").unwrap();
+        self.code.push_str("    PyObject *module = PyModule_Create(&nt_module);\n    if (!module) return NULL;\n");
+        self.code.push_str("    if (nt_constants() < 0 || nt_setup(module) < 0) {\n");
+        self.code.push_str("        Py_DECREF(module);\n        return NULL;\n    }\n");
+        self.code.push_str("    return module;\n}\n");
     }
 
     fn py_class(&mut self, def: DefId, module_object: &str) -> String {
@@ -2195,7 +2435,8 @@ impl<'a> Gen<'a> {
         for (index, value) in values.iter().enumerate() {
             self.emit(format!("PyTuple_SET_ITEM({tuple}, {index}, Py_NewRef({value}));"));
         }
-        let meta = values.first().map_or("(PyObject *)&PyType_Type".to_string(), |b| format!("(PyObject *)Py_TYPE({b})"));
+        let meta =
+            values.first().map_or("(PyObject *)&PyType_Type".to_string(), |b| format!("(PyObject *)Py_TYPE({b})"));
         let name = c_string(&self.p.defs[def].name);
         self.call(Repr::Obj, format!("PyObject_CallFunction({meta}, \"sOO\", {name}, {tuple}, {dict})"))
     }
@@ -2206,11 +2447,18 @@ impl<'a> Gen<'a> {
             if info.module != entry || !info.export {
                 continue;
             }
-            let generic = |owner: DefId| matches!(&self.p.defs[owner].kind, DefKind::Struct { generics, .. } | DefKind::Enum { generics, .. } if !generics.is_empty());
+            let generic = |owner: DefId| match &self.p.defs[owner].kind {
+                DefKind::Struct { generics, .. } | DefKind::Enum { generics, .. } => !generics.is_empty(),
+                _ => false,
+            };
             let value = match &info.kind {
-                DefKind::Fn(sig) if sig.kind == FnKind::Native && sig.owner.is_none() => format!("V{}", self.instance(def, &[])),
+                DefKind::Fn(sig) if sig.kind == FnKind::Native && sig.owner.is_none() => {
+                    format!("V{}", self.instance(def, &[]))
+                }
                 DefKind::Struct { .. } if !generic(def) => format!("(PyObject *)&T{}", self.record(def, &[])),
-                DefKind::Variant { parent, .. } if !generic(*parent) => format!("(PyObject *)&T{}", self.record(def, &[])),
+                DefKind::Variant { parent, .. } if !generic(*parent) => {
+                    format!("(PyObject *)&T{}", self.record(def, &[]))
+                }
                 DefKind::PyClass { global, .. } => format!("G{global}"),
                 _ => continue,
             };

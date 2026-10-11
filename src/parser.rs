@@ -203,7 +203,13 @@ impl Parser {
         self.import_from(py, star, names, pos)
     }
 
-    fn import_from(&mut self, py: bool, star: Option<String>, names: Vec<(String, String, Pos)>, pos: Pos) -> PResult<Import> {
+    fn import_from(
+        &mut self,
+        py: bool,
+        star: Option<String>,
+        names: Vec<(String, String, Pos)>,
+        pos: Pos,
+    ) -> PResult<Import> {
         self.expect("from")?;
         let from = self.string()?;
         self.expect_semicolon();
@@ -291,7 +297,15 @@ impl Parser {
     fn param(&mut self) -> PResult<Param> {
         let pos = self.pos();
         if self.eat("self") {
-            return Ok(Param { name: "self".into(), pos, kind: ParamKind::SelfParam, ty: None, default: None, optional: false, var: false });
+            return Ok(Param {
+                name: "self".into(),
+                pos,
+                kind: ParamKind::SelfParam,
+                ty: None,
+                default: None,
+                optional: false,
+                var: false,
+            });
         }
         let kind = if self.eat("**") {
             ParamKind::StarStar
@@ -473,7 +487,6 @@ impl Parser {
         Ok(TypeExpr::Path(path, args, pos))
     }
 
-
     // Statements:
 
     fn block(&mut self) -> PResult<Block> {
@@ -552,8 +565,14 @@ impl Parser {
                 }
                 Stmt::With(items, self.block()?, pos)
             }
-            Tok::Kw("fn") | Tok::Kw("struct") | Tok::Kw("enum") | Tok::Kw("trait") | Tok::Kw("impl")
-            | Tok::Kw("const") | Tok::Kw("type") | Tok::Sym("@") => Stmt::Item(self.item()?),
+            Tok::Kw("fn")
+            | Tok::Kw("struct")
+            | Tok::Kw("enum")
+            | Tok::Kw("trait")
+            | Tok::Kw("impl")
+            | Tok::Kw("const")
+            | Tok::Kw("type")
+            | Tok::Sym("@") => Stmt::Item(self.item()?),
             Tok::Kw("async") if matches!(self.peek_at(1), Tok::Kw("fn")) => Stmt::Item(self.item()?),
             Tok::Sym(";") => {
                 self.next();
@@ -570,7 +589,9 @@ impl Parser {
             _ => {
                 let expr = self.expr()?;
                 let compound = match self.peek() {
-                    Tok::Sym(sym) if sym.len() >= 2 && sym.ends_with('=') && !matches!(*sym, "==" | "!=" | "<=" | ">=") => {
+                    Tok::Sym(sym)
+                        if sym.len() >= 2 && sym.ends_with('=') && !matches!(*sym, "==" | "!=" | "<=" | ">=") =>
+                    {
                         binop_of(&sym[..sym.len() - 1])
                     }
                     _ => None,
@@ -677,7 +698,9 @@ impl Parser {
         let target = self.expr()?;
         let pos = self.pos();
         let compound = match self.peek() {
-            Tok::Sym(sym) if sym.len() >= 2 && sym.ends_with('=') && !matches!(*sym, "==" | "!=" | "<=" | ">=") => binop_of(&sym[..sym.len() - 1]),
+            Tok::Sym(sym) if sym.len() >= 2 && sym.ends_with('=') && !matches!(*sym, "==" | "!=" | "<=" | ">=") => {
+                binop_of(&sym[..sym.len() - 1])
+            }
             _ => None,
         };
         if !self.is("=") && compound.is_none() {
@@ -833,7 +856,13 @@ impl Parser {
         if !self.eat(":") {
             return Ok(IndexArg::Expr(start.unwrap()));
         }
-        let bound = |p: &mut Self| if matches!(p.peek(), Tok::Sym(":") | Tok::Sym(",") | Tok::Sym("]")) { Ok(None) } else { p.expr().map(Some) };
+        let bound = |p: &mut Self| {
+            if matches!(p.peek(), Tok::Sym(":") | Tok::Sym(",") | Tok::Sym("]")) {
+                Ok(None)
+            } else {
+                p.expr().map(Some)
+            }
+        };
         let stop = bound(self)?;
         let step = if self.eat(":") { bound(self)? } else { None };
         Ok(IndexArg::Slice(start, stop, step))
@@ -1007,7 +1036,9 @@ impl Parser {
                 self.next();
                 PatKind::Wild
             }
-            Tok::Int(_) | Tok::Float(_) | Tok::Str(_) | Tok::Kw("true") | Tok::Kw("false") => PatKind::Lit(Box::new(self.primary()?)),
+            Tok::Int(_) | Tok::Float(_) | Tok::Str(_) | Tok::Kw("true") | Tok::Kw("false") => {
+                PatKind::Lit(Box::new(self.primary()?))
+            }
             Tok::Sym("-") => {
                 self.next();
                 let literal = self.primary()?;
@@ -1071,10 +1102,28 @@ enum Parsed {
 fn binop_of(sym: &str) -> Option<BinOp> {
     use BinOp::*;
     Some(match sym {
-        "+" => Add, "-" => Sub, "*" => Mul, "/" => Div, "~/" => FloorDiv, "%" => Mod, "**" => Pow, "@" => MatMul,
-        "&" => BitAnd, "|" => BitOr, "^" => BitXor, "<<" => Shl, ">>" => Shr,
-        "==" => Eq, "!=" => Ne, "<" => Lt, "<=" => Le, ">" => Gt, ">=" => Ge, "in" => In,
-        "&&" => And, "||" => Or,
+        "+" => Add,
+        "-" => Sub,
+        "*" => Mul,
+        "/" => Div,
+        "~/" => FloorDiv,
+        "%" => Mod,
+        "**" => Pow,
+        "@" => MatMul,
+        "&" => BitAnd,
+        "|" => BitOr,
+        "^" => BitXor,
+        "<<" => Shl,
+        ">>" => Shr,
+        "==" => Eq,
+        "!=" => Ne,
+        "<" => Lt,
+        "<=" => Le,
+        ">" => Gt,
+        ">=" => Ge,
+        "in" => In,
+        "&&" => And,
+        "||" => Or,
         _ => return None,
     })
 }

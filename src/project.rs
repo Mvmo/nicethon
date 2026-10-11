@@ -1,6 +1,6 @@
-// Projects: nice.toml says which python and which packages a program uses,
-// nice.lock pins the exact versions that were installed. The environment
-// lives in .nice/env next to nice.toml and always matches nice.lock.
+//! Projects: nice.toml says which python and which packages a program uses,
+//! nice.lock pins the exact versions that were installed. The environment
+//! lives in .nice/env next to nice.toml and always matches nice.lock.
 
 use crate::toolchain::{self, fail, run, DEFAULT_PYTHON};
 use std::collections::BTreeMap;
@@ -27,13 +27,21 @@ impl Project {
 
     fn load(root: &Path) -> Project {
         let path = root.join("nice.toml");
-        let text = fs::read_to_string(&path).unwrap_or_else(|error| fail(format!("cannot read {}: {error}", path.display())));
-        let mut tables = parse(&text).unwrap_or_else(|(line, message)| fail(format!("{}:{line}: {message}", path.display())));
+        let text =
+            fs::read_to_string(&path).unwrap_or_else(|error| fail(format!("cannot read {}: {error}", path.display())));
+        let mut tables =
+            parse(&text).unwrap_or_else(|(line, message)| fail(format!("{}:{line}: {message}", path.display())));
         let mut project = tables.remove("project").unwrap_or_default();
         let dependencies = tables.remove("dependencies").unwrap_or_default();
-        let unknown = tables.keys().map(|table| format!("[{table}]")).chain(project.keys().filter(|key| !["name", "python", "main"].contains(&key.as_str())).cloned());
+        let unknown = tables
+            .keys()
+            .map(|table| format!("[{table}]"))
+            .chain(project.keys().filter(|key| !["name", "python", "main"].contains(&key.as_str())).cloned());
         if let Some(unknown) = unknown.into_iter().next() {
-            fail(format!("{}: unknown entry {unknown}, allowed are [project] with name, python, main and [dependencies]", path.display()));
+            fail(format!(
+                "{}: unknown entry {unknown}, allowed are [project] with name, python, main and [dependencies]",
+                path.display()
+            ));
         }
         for (name, spec) in &dependencies {
             check_spec(name, spec).unwrap_or_else(|error| fail(format!("{}: {error}", path.display())));
@@ -47,7 +55,9 @@ impl Project {
     }
 
     pub fn current() -> Project {
-        Project::find(Path::new(".")).unwrap_or_else(|| fail("no nice.toml here or in a parent directory, create a project with: nicethon new <name>"))
+        Project::find(Path::new(".")).unwrap_or_else(|| {
+            fail("no nice.toml here or in a parent directory, create a project with: nicethon new <name>")
+        })
     }
 
     // Makes .nice/env match nice.lock, after resolving nice.toml into a new
@@ -56,7 +66,10 @@ impl Project {
         let lock_path = self.root.join("nice.lock");
         let lock_text = fs::read_to_string(&lock_path).unwrap_or_default();
         let lock = parse(&lock_text).unwrap_or_default();
-        let locked_python = lock.get("").and_then(|top| top.get("python")).filter(|version| version.starts_with(&format!("{}.", self.python)));
+        let locked_python = lock
+            .get("")
+            .and_then(|top| top.get("python"))
+            .filter(|version| version.starts_with(&format!("{}.", self.python)));
         let env = self.root.join(".nice").join("env");
         let python = toolchain::interpreter(&env, true);
         let stamp = env.join("nice.lock");
@@ -65,7 +78,8 @@ impl Project {
                 if fs::read_to_string(&stamp).is_ok_and(|text| text == lock_text) {
                     return Ok(python);
                 }
-                let pins = lock.get("packages").into_iter().flatten().map(|(name, version)| format!("{name}=={version}"));
+                let pins =
+                    lock.get("packages").into_iter().flatten().map(|(name, version)| format!("{name}=={version}"));
                 create_env(&env, version, &pins.collect::<Vec<_>>(), &["--no-deps"])?;
                 fs::write(&stamp, lock_text).map_err(|error| error.to_string())?;
             }
@@ -74,10 +88,17 @@ impl Project {
                     Some(version) => version.clone(),
                     None => toolchain::python_version(&self.python)?,
                 };
-                let requirements: Vec<String> = self.dependencies.iter().map(|(name, spec)| if spec == "*" { name.clone() } else { format!("{name}{spec}") }).collect();
+                let requirements: Vec<String> = self
+                    .dependencies
+                    .iter()
+                    .map(|(name, spec)| if spec == "*" { name.clone() } else { format!("{name}{spec}") })
+                    .collect();
                 let base = create_env(&env, &version, &requirements, &[])?;
                 let installed = run(pip(&base, &python).args(["list", "--format=freeze"]), "pip list")?;
-                let mut text = format!("# Written by nicethon from nice.toml, do not edit.\n{}\n[requires]\n", entry("python", &version));
+                let mut text = format!(
+                    "# Written by nicethon from nice.toml, do not edit.\n{}\n[requires]\n",
+                    entry("python", &version)
+                );
                 for (name, spec) in &self.dependencies {
                     text += &entry(name, spec);
                 }
@@ -122,7 +143,10 @@ fn create_env(env: &Path, version: &str, packages: &[String], flags: &[&str]) ->
     run(Command::new(&base).args(["-m", "venv", "--without-pip"]).arg(env), "python -m venv")?;
     if !packages.is_empty() {
         eprintln!("installing {}", packages.join(", "));
-        run(pip(&base, &toolchain::interpreter(env, true)).args(["install", "--quiet"]).args(flags).args(packages), "pip install")?;
+        run(
+            pip(&base, &toolchain::interpreter(env, true)).args(["install", "--quiet"]).args(flags).args(packages),
+            "pip install",
+        )?;
     }
     Ok(base)
 }
@@ -133,7 +157,10 @@ pub fn create(name: &str) {
         fail(format!("{name} already exists"));
     }
     let files = [
-        ("nice.toml", format!("[project]\n{}{}\n[dependencies]\n", entry("name", name), entry("python", DEFAULT_PYTHON))),
+        (
+            "nice.toml",
+            format!("[project]\n{}{}\n[dependencies]\n", entry("name", name), entry("python", DEFAULT_PYTHON)),
+        ),
         ("main.nice", format!("fn main() {{\n    print(\"Hello from {name}!\");\n}}\n")),
         (".gitignore", "/.nice\n/build\n".into()),
     ];
@@ -223,8 +250,13 @@ fn parse(text: &str) -> Result<BTreeMap<String, Table>, (usize, String)> {
             let end = line.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-')).unwrap_or(line.len());
             (line[..end].to_string(), &line[end..])
         };
-        let rest = rest.trim_start().strip_prefix('=').filter(|_| !key.is_empty()).ok_or_else(|| error("expected key = \"value\""))?;
-        let (value, rest) = string(rest.trim_start()).ok_or_else(|| error("values must be strings in double quotes"))?;
+        let rest = rest
+            .trim_start()
+            .strip_prefix('=')
+            .filter(|_| !key.is_empty())
+            .ok_or_else(|| error("expected key = \"value\""))?;
+        let (value, rest) =
+            string(rest.trim_start()).ok_or_else(|| error("values must be strings in double quotes"))?;
         if !(rest.trim().is_empty() || rest.trim_start().starts_with('#')) {
             return Err(error("unexpected text after the value"));
         }

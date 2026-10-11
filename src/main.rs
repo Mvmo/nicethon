@@ -31,10 +31,13 @@ fn location(text: &str, pos: u32) -> (usize, usize) {
 }
 
 fn report(loaded: &Loaded, diags: &[(usize, u32, String)]) -> ! {
-    let mut sorted: Vec<_> = diags.iter().map(|(module, pos, message)| {
-        let (line, column) = location(&loaded.texts[*module], *pos);
-        (*module, line, column, message)
-    }).collect();
+    let mut sorted: Vec<_> = diags
+        .iter()
+        .map(|(module, pos, message)| {
+            let (line, column) = location(&loaded.texts[*module], *pos);
+            (*module, line, column, message)
+        })
+        .collect();
     sorted.sort();
     for (module, line, column, message) in sorted {
         eprintln!("{}:{line}:{column}: error: {message}", loaded.names[module]);
@@ -46,7 +49,10 @@ fn load(entry: &Path) -> Loaded {
     let mut loaded = Loaded { names: vec![], texts: vec![], sources: vec![] };
     let mut paths: Vec<Option<PathBuf>> = vec![];
     let mut diags = vec![];
-    let mut queue = vec![(None, "<prelude>".to_string(), PRELUDE.to_string()), (None, "<bindings>".to_string(), BINDINGS.to_string())];
+    let mut queue = vec![
+        (None, "<prelude>".to_string(), PRELUDE.to_string()),
+        (None, "<bindings>".to_string(), BINDINGS.to_string()),
+    ];
     let text = std::fs::read_to_string(entry).unwrap_or_else(|error| {
         eprintln!("cannot read {}: {error}", entry.display());
         exit(1)
@@ -98,7 +104,10 @@ fn build(entry: &Path, out_dir: &Path, python: &Path, release: bool) -> String {
     let loaded = load(entry);
     let module_name = entry.file_stem().unwrap().to_string_lossy().to_string();
     if !module_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        fail(format!("{}: the file name must only use letters, digits and _, it becomes the python module name", entry.display()));
+        fail(format!(
+            "{}: the file name must only use letters, digits and _, it becomes the python module name",
+            entry.display()
+        ));
     }
     let program = match check::check(&loaded.sources, 2) {
         Ok(program) => program,
@@ -174,11 +183,24 @@ fn main() {
                 "build" => _ = build(&entry, Path::new(out_dir), &project::python_for(project.as_ref()), release),
                 _ => {
                     let python = project::python_for(project.as_ref());
-                    let cache = project.map_or_else(|| std::env::temp_dir().join("nicethon-build"), |project| project.root.join(".nice").join("build"));
-                    let out_dir = cache.join(entry.canonicalize().map(|p| format!("{:x}", hash(&p))).unwrap_or_default());
+                    let cache = project.map_or_else(
+                        || std::env::temp_dir().join("nicethon-build"),
+                        |project| project.root.join(".nice").join("build"),
+                    );
+                    let out_dir =
+                        cache.join(entry.canonicalize().map(|p| format!("{:x}", hash(&p))).unwrap_or_default());
                     let module = build(&entry, &out_dir, &python, release);
-                    let script = format!("import sys, importlib; sys.argv = sys.argv[1:]; sys.path.insert(0, {:?}); importlib.import_module({module:?}).main()", out_dir.display().to_string());
-                    let status = Command::new(&python).args(["-c", &script]).arg(&entry).args(program_args).status().unwrap_or_else(|error| fail(error));
+                    let path = out_dir.display().to_string();
+                    let script = format!(
+                        "import sys, importlib; sys.argv = sys.argv[1:]; sys.path.insert(0, {path:?}); \
+                         importlib.import_module({module:?}).main()"
+                    );
+                    let status = Command::new(&python)
+                        .args(["-c", &script])
+                        .arg(&entry)
+                        .args(program_args)
+                        .status()
+                        .unwrap_or_else(|error| fail(error));
                     if status.code().is_none() {
                         eprintln!("the program crashed ({status})");
                     }

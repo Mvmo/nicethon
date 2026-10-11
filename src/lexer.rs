@@ -25,17 +25,15 @@ pub struct Token {
 }
 
 pub const KEYWORDS: &[&str] = &[
-    "as", "async", "await", "break", "catch", "class", "const", "continue", "else", "enum", "export",
-    "extern", "false", "finally", "fn", "for", "from", "if", "impl", "import", "in", "let", "loop",
-    "match", "py", "return", "self", "Self", "struct", "super", "throw", "trait", "true", "try",
-    "type", "var", "while", "with",
+    "as", "async", "await", "break", "catch", "class", "const", "continue", "else", "enum", "export", "extern",
+    "false", "finally", "fn", "for", "from", "if", "impl", "import", "in", "let", "loop", "match", "py", "return",
+    "self", "Self", "struct", "super", "throw", "trait", "true", "try", "type", "var", "while", "with",
 ];
 
 const SYMBOLS: &[&str] = &[
-    "...", "..=", "**=", "~/=", "<<=", ">>=", "=>", "->", "|>", "..", "==", "!=", "<=", ">=", "&&", "||",
-    "**", "~/", "<<", ">>", "+=", "-=", "*=", "/=", "%=", "@=", "&=", "|=", "^=", "+", "-", "*", "/",
-    "%", "@", "&", "|", "^", "~", "!", "<", ">", "=", ".", ",", ";", ":", "?", "(", ")", "[", "]", "{",
-    "}",
+    "...", "..=", "**=", "~/=", "<<=", ">>=", "=>", "->", "|>", "..", "==", "!=", "<=", ">=", "&&", "||", "**", "~/",
+    "<<", ">>", "+=", "-=", "*=", "/=", "%=", "@=", "&=", "|=", "^=", "+", "-", "*", "/", "%", "@", "&", "|", "^", "~",
+    "!", "<", ">", "=", ".", ",", ";", ":", "?", "(", ")", "[", "]", "{", "}",
 ];
 
 pub fn lex(src: &str, base: u32) -> Result<Vec<Token>, (u32, String)> {
@@ -85,7 +83,8 @@ pub fn lex(src: &str, base: u32) -> Result<Vec<Token>, (u32, String)> {
                     at += 1;
                 }
                 let word = &src[start..at];
-                if word == "as" && matches!(bytes.get(at), Some(b'!') | Some(b'?')) && bytes.get(at + 1) != Some(&b'=') {
+                if word == "as" && matches!(bytes.get(at), Some(b'!') | Some(b'?')) && bytes.get(at + 1) != Some(&b'=')
+                {
                     at += 1;
                     Tok::Sym(if bytes[at - 1] == b'!' { "as!" } else { "as?" })
                 } else if let Some(kw) = KEYWORDS.iter().find(|kw| **kw == word) {
