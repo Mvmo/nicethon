@@ -571,13 +571,20 @@ impl<'a> Gen<'a> {
         if resolved == Ty::Dyn {
             return value.to_string();
         }
-        let (spec, display) = (self.spec(&resolved), self.show(&resolved));
-        let converted = self.call(
-            Repr::Obj,
-            format!("nt_from_py({value}, {}, {}, {})", c_string(&spec), c_string(&display), c_string(context)),
-        );
-        let repr = self.repr_of(&resolved);
-        self.unbox(&converted, repr)
+        let context = c_string(context);
+        match self.repr_of(&resolved) {
+            Repr::I64 => self.call(Repr::I64, format!("nt_checked_i64({value}, {context})")),
+            Repr::F64 => self.call(Repr::F64, format!("nt_checked_f64({value}, {context})")),
+            Repr::Bool => self.call(Repr::Bool, format!("nt_checked_bool({value}, {context})")),
+            repr => {
+                let (spec, display) = (self.spec(&resolved), self.show(&resolved));
+                let converted = self.call(
+                    Repr::Obj,
+                    format!("nt_from_py({value}, {}, {}, {context})", c_string(&spec), c_string(&display)),
+                );
+                self.unbox(&converted, repr)
+            }
+        }
     }
 
     // Locals:

@@ -280,6 +280,8 @@ A failed check throws `TypeError`:
 ```
 expected Int, found str                       (as!)
 argument 'point': expected Point, found tuple (exported functions, lambdas called by Python)
+argument 'count': expected Int, found int out of 64 bit range
+argument 'points': expected List<Point>, found list (item 3 is tuple)
 ```
 
 Python type names are `module.qualname`, without the module for builtins:
@@ -360,7 +362,7 @@ calls are checked like `as!`.
 | `Float` | `float`, `int` and objects with `__float__` (numpy floats) |
 | `Bool` | `bool`, and `numpy.bool` as a special case |
 | `Str`, `Bytes` | `str`, `bytes` and their subclasses |
-| `List<T>` | a Nicethon list with the same element storage: O(1). A Python `list` or `tuple`: copied, every element checked |
+| `List<T>` | a Nicethon list with the same element storage: O(1). A Python `list` or `tuple`: copied, every element checked. For `List<Float>` and `List<Int>` also a 1-D buffer of float64 or int64 values (a numpy array, also a strided view): copied without creating Python objects |
 | `Map<K, V>`, `Set<T>` | a `dict` or `set`; the elements are not checked |
 | `(A, B)` | a tuple of the same length, every element checked |
 | `Option<T>` | `None` gives `None`, anything else is checked as `T` and wrapped in `Some` |

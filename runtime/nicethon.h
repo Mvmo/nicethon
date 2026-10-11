@@ -742,6 +742,33 @@ static PyTypeObject *nt_spec_type(const char *spec) {
 
 // Returns a new reference in Nicethon form. NULL without an error set means a
 // type mismatch, NULL with an error set means another failure.
+// The innermost list item that failed a check, for the error message.
+static PyObject *nt_bad_item;
+static Py_ssize_t nt_bad_index;
+static char nt_bad_spec;
+
+// A 1-D buffer of float64 or int64 values, like a numpy array, copied into a
+// new list without creating python objects. NULL without an error if the
+// buffer does not have that shape.
+static PyObject *nt_list_from_buffer(PyObject *value, int kind) {
+    Py_buffer view;
+    if (PyObject_GetBuffer(value, &view, PyBUF_RECORDS_RO) < 0) {
+        PyErr_Clear();
+        return NULL;
+    }
+    const char *format = view.format ? view.format : "B";
+    if (strchr("@=<", format[0])) format++;
+    int fits = view.ndim == 1 && view.itemsize == 8 && format[0] && !format[1] && strchr(kind == NT_F64 ? "d" : "lq", format[0]);
+    PyObject *list = fits ? nt_list_new(kind, view.shape[0]) : NULL;
+    if (list) {
+        for (Py_ssize_t i = 0; i < view.shape[0]; i++)
+            memcpy(((nt_List *)list)->data + i * 8, (char *)view.buf + i * view.strides[0], 8);
+        ((nt_List *)list)->length = view.shape[0];
+    }
+    PyBuffer_Release(&view);
+    return list;
+}
+
 static PyObject *nt_convert(PyObject *value, const char **spec) {
     char c = *(*spec)++;
     switch (c) {
@@ -836,6 +863,10 @@ static PyObject *nt_convert(PyObject *value, const char **spec) {
             if (list->kind == kind && (inner[0] == 'd' || kind != NT_OBJ || (item_type && list->item_type == item_type)))
                 return Py_NewRef(value);
         }
+        if ((kind == NT_I64 || kind == NT_F64) && !PyList_Check(value) && !PyTuple_Check(value)) {
+            PyObject *list = nt_list_from_buffer(value, kind);
+            if (list) return list;
+        }
         if (!PyList_Check(value) && !PyTuple_Check(value) && !Py_IS_TYPE(value, &nt_ListType)) return NULL;
         Py_ssize_t length = PySequence_Length(value);
         PyObject *list = nt_list_new(kind, length);
@@ -845,6 +876,11 @@ static PyObject *nt_convert(PyObject *value, const char **spec) {
             PyObject *raw = PySequence_GetItem(value, i);
             const char *cursor = inner;
             PyObject *item = raw ? nt_convert(raw, &cursor) : NULL;
+            if (!item && raw && !PyErr_Occurred() && !nt_bad_item) {
+                nt_bad_item = Py_NewRef(raw);
+                nt_bad_index = i;
+                nt_bad_spec = inner[0];
+            }
             Py_XDECREF(raw);
             if (!item || nt_list_append(list, item) < 0) {
                 Py_XDECREF(item);
@@ -865,21 +901,70 @@ static PyObject *nt_convert(PyObject *value, const char **spec) {
     return NULL;
 }
 
+// What a value that failed the check against a spec is, for error messages.
+static PyObject *nt_describe(PyObject *value, char spec) {
+    if (spec == 'i' && PyLong_Check(value) && !PyBool_Check(value)) return PyUnicode_FromString("int out of 64 bit range");
+    return nt_type_name(value);
+}
+
 static PyObject *nt_from_py(PyObject *value, const char *spec, const char *display, const char *context) {
     const char *cursor = spec;
+    Py_CLEAR(nt_bad_item);
     PyObject *result = nt_convert(value, &cursor);
-    if (result || PyErr_Occurred()) return result;
-    PyObject *found = nt_type_name(value);
-    if (context && context[0]) PyErr_Format(PyExc_TypeError, "argument '%s': expected %s, found %U", context, display, found);
-    else PyErr_Format(PyExc_TypeError, "expected %s, found %U", display, found);
+    if (result || PyErr_Occurred()) {
+        Py_CLEAR(nt_bad_item);
+        return result;
+    }
+    PyObject *found = nt_describe(value, spec[0]);
+    PyObject *item = nt_bad_item ? nt_describe(nt_bad_item, nt_bad_spec) : NULL;
+    PyObject *detail = item ? PyUnicode_FromFormat(" (item %zd is %U)", nt_bad_index, item) : PyUnicode_FromString("");
+    Py_CLEAR(nt_bad_item);
+    if (context && context[0]) PyErr_Format(PyExc_TypeError, "argument '%s': expected %s, found %U%U", context, display, found, detail);
+    else PyErr_Format(PyExc_TypeError, "expected %s, found %U%U", display, found, detail);
     Py_XDECREF(found);
+    Py_XDECREF(item);
+    Py_XDECREF(detail);
     return NULL;
+}
+
+// Checked unboxing at the boundary: exact int, float and bool convert
+// directly, everything else goes through nt_from_py.
+static int64_t nt_checked_i64(PyObject *value, const char *context) {
+    if (PyLong_CheckExact(value)) {
+        int overflow = 0;
+        long long result = PyLong_AsLongLongAndOverflow(value, &overflow);
+        if (!overflow) return result;
+    }
+    PyObject *number = nt_from_py(value, "i", "Int", context);
+    if (!number) return -1;
+    long long result = PyLong_AsLongLong(number);
+    Py_DECREF(number);
+    return result;
+}
+
+static double nt_checked_f64(PyObject *value, const char *context) {
+    if (PyFloat_CheckExact(value)) return PyFloat_AS_DOUBLE(value);
+    PyObject *number = nt_from_py(value, "f", "Float", context);
+    if (!number) return -1.0;
+    double result = PyFloat_AsDouble(number);
+    Py_DECREF(number);
+    return result;
+}
+
+static int nt_checked_bool(PyObject *value, const char *context) {
+    if (PyBool_Check(value)) return value == Py_True;
+    PyObject *flag = nt_from_py(value, "b", "Bool", context);
+    if (!flag) return -1;
+    int result = flag == Py_True;
+    Py_DECREF(flag);
+    return result;
 }
 
 static PyObject *nt_try_convert(PyObject *value, const char *spec) {
     const char *cursor = spec;
     PyObject *result = nt_convert(value, &cursor);
     PyErr_Clear();
+    Py_CLEAR(nt_bad_item);
     return result;
 }
 

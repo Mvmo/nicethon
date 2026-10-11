@@ -14,6 +14,14 @@ export fn scale_all(points: List<Point>, factor: Float) -> List<Point> {
     points.map(point => Point(point.x * factor, point.y * factor))
 }
 
+export fn total(values: List<Float>) -> Float {
+    values.fold(0.0, (sum, value) => sum + value)
+}
+
+export fn halve(value: Int) -> Int {
+    value ~/ 2
+}
+
 fn not_exported() -> Int {
     1
 }
