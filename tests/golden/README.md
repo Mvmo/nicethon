@@ -20,11 +20,7 @@ interop/   one directory per test: Nicethon modules plus driver.py. The
 Fuzzing (`tests/fuzz.py`) complements these tests; regressions it found
 live in `run/18_semantics.nice` and the `err/` tests e09 and e10.
 
-Header lines at the top of a test:
-
-```
-// requires: numpy        skip the test if the package cannot be imported
-```
+The tests belong to the project in `tests/nice.toml`, which provides numpy.
 
 Every expected output was checked by hand against the spec. Output that
 comes from Python itself (numpy printing, exception messages,

@@ -1,4 +1,3 @@
-// requires: numpy
 // Nicethon lambdas and functions handed to python. A lambda passed to a Dyn
 // parameter gets Dyn parameters unless annotated; annotated parameters are
 // checked every time python calls in.

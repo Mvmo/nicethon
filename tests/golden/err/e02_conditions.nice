@@ -1,4 +1,3 @@
-// requires: numpy
 // No truthiness: conditions must be Bool. Catches numpy's
 // "truth value of an array is ambiguous" at compile time.
 import py * as np from "numpy";

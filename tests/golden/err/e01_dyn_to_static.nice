@@ -1,4 +1,3 @@
-// requires: numpy
 // Dyn never flows into a static type without as! or as?.
 import py * as np from "numpy";
 

@@ -11,16 +11,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 GOLDEN = ROOT / "tests" / "golden"
 COMPILER = ROOT / "target" / "debug" / "nicethon"
-PYTHON = os.path.join(os.environ["VIRTUAL_ENV"], "bin", "python") if "VIRTUAL_ENV" in os.environ else sys.executable
-
-
-def importable(source):
-    modules = re.findall(r"^// requires: (\S+)", source, re.M)
-    return all(subprocess.run([PYTHON, "-c", f"import {m}"], capture_output=True).returncode == 0 for m in modules)
 
 
 def run_test(path):
-    result = subprocess.run([COMPILER, "run", path, "--python", PYTHON], capture_output=True, text=True)
+    result = subprocess.run([COMPILER, "run", path], capture_output=True, text=True)
     expected = path.with_suffix(".out").read_text()
     if result.stdout == expected:
         return None
@@ -49,11 +43,11 @@ def error_test(path):
 def interop_test(directory):
     with tempfile.TemporaryDirectory() as out:
         for source in directory.glob("*.nice"):
-            build = subprocess.run([COMPILER, "build", source, "-o", out, "--python", PYTHON], capture_output=True, text=True)
+            build = subprocess.run([COMPILER, "build", source, "-o", out], capture_output=True, text=True)
             if build.returncode != 0:
                 return build.stderr
         env = dict(os.environ, PYTHONPATH=out)
-        result = subprocess.run([PYTHON, directory / "driver.py"], capture_output=True, text=True, env=env)
+        result = subprocess.run([COMPILER, "python", directory / "driver.py"], capture_output=True, text=True, env=env, cwd=directory)
     expected = (directory / "expected.out").read_text()
     return None if result.stdout == expected else f"expected:\n{expected}\ngot:\n{result.stdout}\n{result.stderr}"
 
@@ -69,14 +63,10 @@ def main():
     tests = [(p, run_test) for p in sorted((GOLDEN / "run").glob("*.nice"))]
     tests += [(p, error_test) for p in sorted((GOLDEN / "err").glob("*.nice"))]
     tests += [(p, interop_test) for p in sorted((GOLDEN / "interop").iterdir()) if p.is_dir()]
-    tests += [(p, example_test) for p in sorted((ROOT / "examples").rglob("*.nice"))]
+    tests += [(p, example_test) for p in sorted((ROOT / "examples").rglob("*.nice")) if p.is_file() and ".nice" not in p.parts]
     failed = 0
     for path, check in tests:
         if selected not in path.name:
-            continue
-        sources = [path] if path.is_file() else list(path.glob("*.nice"))
-        if not all(importable(s.read_text()) for s in sources):
-            print(f"skip {path.name}")
             continue
         problem = check(path)
         print(f"{'FAIL' if problem else 'ok  '} {path.name}")

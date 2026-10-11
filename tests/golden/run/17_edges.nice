@@ -1,4 +1,3 @@
-// requires: numpy
 // Trait impls for builtin types, unit fields, defaults, keyword spreads,
 // numpy indexing and the in operator.
 import py * as builtins from "builtins";

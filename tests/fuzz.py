@@ -14,7 +14,6 @@ python3 tests/fuzz.py diff [rounds] [seed]
 Failing inputs are written to build/fuzz/.
 """
 import math
-import os
 import random
 import re
 import subprocess
@@ -25,7 +24,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 COMPILER = ROOT / "target" / "debug" / "nicethon"
 FINDINGS = ROOT / "build" / "fuzz"
-PYTHON = os.path.join(os.environ["VIRTUAL_ENV"], "bin", "python") if "VIRTUAL_ENV" in os.environ else sys.executable
 VOCABULARY = ["fn", "let", "var", "match", "if", "else", "{", "}", "(", ")", "[", "]", ";", ",", "=>", "->", ".", "?",
               "as!", "as?", "|>", "..", "Int", "Float", "Str", "Dyn", "List<Int>", "Option<", ">", "0", "-1", "\"x\"",
               "`a${1}`", "try", "catch", "throw", "return", "break", "self", "py", "struct", "enum", "impl", "<T>"]
@@ -101,12 +99,12 @@ def syntax(rounds, rng):
                 problem = f"check crashed:\n{checked.stderr}"
             elif checked.returncode == 0:
                 out = Path(work) / "out"
-                built = run([COMPILER, "build", source, "-o", out, "--python", PYTHON], timeout=120)
+                built = run([COMPILER, "build", source, "-o", out], timeout=120)
                 if built is None or built.returncode != 0:
                     problem = f"build failed:\n{built.stderr if built else 'timeout'}"
                 else:
                     script = "import sys; sys.path.insert(0, sys.argv[1]); import mutant; mutant.main()"
-                    ran = run([PYTHON, "-c", script, out], timeout=10, cwd=work)
+                    ran = run([COMPILER, "python", "-c", script, out], timeout=10, cwd=work)
                     executed += 1
                     if ran is not None and ran.returncode < 0:
                         problem = f"crashed with signal {-ran.returncode}:\n{ran.stderr[-2000:]}"
@@ -592,8 +590,8 @@ def differential(rounds, rng):
             nice, python = Program(rng).build(cases=rng.randint(3, 8))
             (Path(work) / "program.nice").write_text(nice)
             (Path(work) / "model.py").write_text(python)
-            expected = run([PYTHON, Path(work) / "model.py"])
-            actual = run([COMPILER, "run", Path(work) / "program.nice", "--python", PYTHON], timeout=120)
+            expected = run([sys.executable, Path(work) / "model.py"])
+            actual = run([COMPILER, "run", Path(work) / "program.nice"], timeout=120)
             problem = None
             if expected is None or expected.returncode != 0:
                 problem = f"model failed:\n{expected.stderr if expected else 'timeout'}"
