@@ -5,9 +5,13 @@ mod expr;
 mod hir;
 mod lexer;
 mod parser;
+mod project;
+mod toolchain;
 
+use project::Project;
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
+use toolchain::fail;
 
 const PRELUDE: &str = include_str!("../lib/prelude.nice");
 const BINDINGS: &str = include_str!("../lib/bindings.nice");
@@ -90,99 +94,100 @@ fn load(entry: &Path) -> Loaded {
     loaded
 }
 
-fn python_config(python: &str) -> (String, String) {
-    let script = "import sysconfig; print(sysconfig.get_paths()['include']); print(sysconfig.get_config_var('EXT_SUFFIX'))";
-    let output = Command::new(python).args(["-c", script]).output().unwrap_or_else(|error| {
-        eprintln!("cannot run {python}: {error}");
-        exit(1)
-    });
-    let text = String::from_utf8_lossy(&output.stdout).to_string();
-    let mut lines = text.lines();
-    (lines.next().unwrap_or_default().to_string(), lines.next().unwrap_or(".so").to_string())
-}
-
-fn build(entry: &Path, out_dir: &Path, python: &str, release: bool) -> String {
+fn build(entry: &Path, out_dir: &Path, python: &Path, release: bool) -> String {
     let loaded = load(entry);
     let module_name = entry.file_stem().unwrap().to_string_lossy().to_string();
     if !module_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        eprintln!("{}: the file name must only use letters, digits and _, it becomes the python module name", entry.display());
-        exit(1);
+        fail(format!("{}: the file name must only use letters, digits and _, it becomes the python module name", entry.display()));
     }
     let program = match check::check(&loaded.sources, 2) {
         Ok(program) => program,
         Err(diags) => report(&loaded, &diags.into_iter().map(|d| (d.module, d.pos, d.message)).collect::<Vec<_>>()),
     };
     let c_source = codegen::generate(&program, &module_name, &loaded.names, &loaded.texts);
-    std::fs::create_dir_all(out_dir).unwrap();
+    std::fs::create_dir_all(out_dir).unwrap_or_else(|error| fail(error));
     std::fs::write(out_dir.join("nicethon.h"), RUNTIME).unwrap();
     let c_path = out_dir.join(format!("{module_name}.c"));
     std::fs::write(&c_path, c_source).unwrap();
-    let (include, suffix) = python_config(python);
-    let output = out_dir.join(format!("{module_name}{suffix}"));
-    let mut cc = Command::new(std::env::var("CC").unwrap_or("cc".into()));
-    cc.args(["-shared", "-fPIC", "-w", "-std=c11"]).arg(if release { "-O2" } else { "-O1" }).arg(format!("-I{include}")).arg(format!("-I{}", out_dir.display()));
-    if cfg!(target_os = "macos") {
-        cc.args(["-undefined", "dynamic_lookup"]);
-    }
-    cc.arg(&c_path).arg("-o").arg(&output);
-    let status = cc.status().unwrap_or_else(|error| {
-        eprintln!("cannot run the C compiler: {error}");
-        exit(1)
-    });
-    if !status.success() {
-        eprintln!("C compilation failed, see {}", c_path.display());
-        exit(1);
-    }
+    toolchain::compile(python, &c_path, &module_name, release).unwrap_or_else(|error| fail(error));
     module_name
 }
 
+const USAGE: &str = "usage:
+  nicethon new <name>                 create a project
+  nicethon add <package> [version]    add a dependency, e.g. nicethon add numpy \">=2\"
+  nicethon remove <package>           remove a dependency
+  nicethon sync                       install python and the packages in nice.lock
+  nicethon update                     resolve nice.toml again, to the newest allowed versions
+  nicethon check [file.nice]          type check
+  nicethon run [file.nice] [--release] [-- program arguments]
+  nicethon build [file.nice] [-o dir] [--release]
+  nicethon python [arguments]         run the project's python
+Without a file, check, run and build use the project's main file.";
+
 fn main() {
     let all: Vec<String> = std::env::args().skip(1).collect();
+    if all.first().is_some_and(|command| command == "python") {
+        let python = project::python_for(Project::find(Path::new(".")).as_ref());
+        let status = Command::new(python).args(&all[1..]).status().unwrap_or_else(|error| fail(error));
+        exit(status.code().unwrap_or(1));
+    }
     let split = all.iter().position(|a| a == "--").unwrap_or(all.len());
     let (args, program_args) = (&all[..split], all.get(split + 1..).unwrap_or_default());
-    let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
-    let python = flag("--python")
-        .or_else(|| std::env::var("VIRTUAL_ENV").ok().map(|venv| format!("{venv}/bin/python")))
-        .unwrap_or_else(|| "python3".to_string());
-    // Flags may stand anywhere before "--"; the rest are command and file.
-    let mut positional = Vec::new();
+    // Flags may stand anywhere before "--".
+    let (mut positional, mut out_dir, mut release) = (vec![], "build", false);
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
-            "-o" | "--python" => _ = rest.next(),
-            "--release" => {}
-            _ => positional.push(arg),
+            "-o" => out_dir = rest.next().map_or(out_dir, String::as_str),
+            "--release" => release = true,
+            _ => positional.push(arg.as_str()),
         }
     }
-    let (Some(command), Some(file)) = (positional.first(), positional.get(1)) else {
-        eprintln!("usage: nicethon <check|build|run> file.nice [-o dir] [--python path] [--release] [-- program arguments]");
-        exit(2);
-    };
-    let entry = PathBuf::from(file);
-    let release = args.iter().any(|a| a == "--release");
-    match command.as_str() {
-        "check" => {
-            let loaded = load(&entry);
-            if let Err(diags) = check::check(&loaded.sources, 2) {
-                report(&loaded, &diags.into_iter().map(|d| (d.module, d.pos, d.message)).collect::<Vec<_>>());
+    match positional[..] {
+        ["new", name] => project::create(name),
+        ["add", name] => project::edit_dependency(name, Some("*")),
+        ["add", name, spec] => project::edit_dependency(name, Some(spec)),
+        ["remove", name] => project::edit_dependency(name, None),
+        ["sync"] => _ = Project::current().sync().unwrap_or_else(|error| fail(error)),
+        ["update"] => _ = Project::current().update().unwrap_or_else(|error| fail(error)),
+        [command @ ("check" | "build" | "run")] | [command @ ("check" | "build" | "run"), _] => {
+            let (entry, project) = match positional.get(1) {
+                Some(file) => {
+                    let entry = PathBuf::from(file);
+                    let dir = entry.parent().filter(|dir| !dir.as_os_str().is_empty()).unwrap_or(Path::new("."));
+                    let project = Project::find(dir);
+                    (entry, project)
+                }
+                None => {
+                    let project = Project::current();
+                    (project.root.join(&project.main), Some(project))
+                }
+            };
+            match command {
+                "check" => {
+                    let loaded = load(&entry);
+                    if let Err(diags) = check::check(&loaded.sources, 2) {
+                        report(&loaded, &diags.into_iter().map(|d| (d.module, d.pos, d.message)).collect::<Vec<_>>());
+                    }
+                }
+                "build" => _ = build(&entry, Path::new(out_dir), &project::python_for(project.as_ref()), release),
+                _ => {
+                    let python = project::python_for(project.as_ref());
+                    let cache = project.map_or_else(|| std::env::temp_dir().join("nicethon-build"), |project| project.root.join(".nice").join("build"));
+                    let out_dir = cache.join(entry.canonicalize().map(|p| format!("{:x}", hash(&p))).unwrap_or_default());
+                    let module = build(&entry, &out_dir, &python, release);
+                    let script = format!("import sys, importlib; sys.argv = sys.argv[1:]; sys.path.insert(0, {:?}); importlib.import_module({module:?}).main()", out_dir.display().to_string());
+                    let status = Command::new(&python).args(["-c", &script]).arg(&entry).args(program_args).status().unwrap_or_else(|error| fail(error));
+                    if status.code().is_none() {
+                        eprintln!("the program crashed ({status})");
+                    }
+                    exit(status.code().unwrap_or(1));
+                }
             }
-        }
-        "build" => {
-            let out_dir = PathBuf::from(flag("-o").unwrap_or("build".into()));
-            build(&entry, &out_dir, &python, release);
-        }
-        "run" => {
-            let out_dir = std::env::temp_dir().join("nicethon-build").join(entry.canonicalize().map(|p| format!("{:x}", hash(&p))).unwrap_or_default());
-            let module = build(&entry, &out_dir, &python, release);
-            let script = format!("import sys, importlib; sys.argv = sys.argv[1:]; sys.path.insert(0, {:?}); importlib.import_module({module:?}).main()", out_dir.display().to_string());
-            let status = Command::new(&python).args(["-c", &script, file]).args(program_args).status().unwrap();
-            if status.code().is_none() {
-                eprintln!("the program crashed ({status})");
-            }
-            exit(status.code().unwrap_or(1));
         }
         _ => {
-            eprintln!("unknown command {command}");
+            eprintln!("{USAGE}");
             exit(2);
         }
     }

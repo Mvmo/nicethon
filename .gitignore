@@ -1,4 +1,5 @@
-/target
-/build
+target/
+build/
+.nice/
 __pycache__/
 damped.png
