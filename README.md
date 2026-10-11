@@ -13,37 +13,73 @@ Python library keeps working.
 
 ## Setup
 
-Needs Rust (cargo), a C compiler (clang or gcc) and CPython 3.12 or newer
-with its headers.
+Building the compiler needs Rust (cargo). Everything else comes with
+nicethon: on first use it downloads CPython (builds from
+[python-build-standalone](https://github.com/astral-sh/python-build-standalone),
+checked against their SHA-256) and [zig](https://ziglang.org) as the C
+compiler into `~/.nicethon` (`$NICETHON_HOME` moves it). Both are shared by
+all projects. No system python, no virtualenv, no C compiler to install.
+The downloads use `curl` and `tar`, which come with macOS, Linux and
+Windows 10 and newer.
 
 ```bash
-cargo build --release
+cargo install --path .
 ```
 
 ```bash
-./target/release/nicethon run hello.nice
+nicethon new hello
 ```
 
-`cargo install --path .` puts `nicethon` on the PATH.
+```bash
+cd hello && nicethon run
+```
+
+## Projects
+
+A project is a directory with a `nice.toml`:
+
+```toml
+[project]
+name = "stats"
+python = "3.14"          # 3.12, 3.13 or 3.14
+main = "main.nice"       # the default
+
+[dependencies]
+numpy = ">=2"            # a pip version specifier, or "*" for any version
+matplotlib = "*"
+```
+
+`nice.lock` records the exact python build and every installed package,
+the indirect ones too. Commit it: `nicethon sync` on another machine
+installs exactly these versions. The packages live in `.nice/env`, which
+nicethon rebuilds whenever it differs from `nice.lock`.
 
 | Command | Does |
 |---|---|
-| `nicethon check file.nice` | type check only |
-| `nicethon run file.nice` | compile, then run `main()` |
-| `nicethon build file.nice -o build` | write `build/file.c` and the extension module `build/file.cpython-*.so` |
+| `nicethon new name` | create a project with `nice.toml`, `main.nice` and `.gitignore` |
+| `nicethon add numpy ">=2"` | add a dependency (without a version: any) and install it |
+| `nicethon remove numpy` | remove a dependency |
+| `nicethon sync` | install python and the packages of `nice.lock`; a changed `nice.toml` is resolved into a new `nice.lock` first |
+| `nicethon update` | resolve `nice.toml` again, to the newest versions it allows |
+| `nicethon check [file]` | type check only |
+| `nicethon run [file]` | compile, then run `main()` |
+| `nicethon build [file] -o build` | write `build/file.c` and the extension module `build/file.cpython-*.so` |
+| `nicethon python [arguments]` | the project's python, e.g. to import built modules |
+
+Without a file, `check`, `run` and `build` use the project's main file.
+`run` and `build` sync the environment first. A file belongs to the nearest
+`nice.toml` in its directory or above. A file outside every project runs
+with python 3.14 and the standard library only.
 
 Flags: `--release` compiles the C code with `-O2` instead of `-O1`.
-Arguments after `--` go to the program (`sys.argv`). `CC` picks the C
-compiler (default `cc`).
-`--python path` picks the interpreter. Without it, the active virtualenv
-(`$VIRTUAL_ENV`) is used, otherwise `python3`. The packages installed for
-that interpreter are the ones a program can import.
+Arguments after `--` go to the program (`sys.argv`).
 
 Examples are in [examples](examples), from hello world to a Nicethon
 library used by plain Python.
 
 Tests: `python3 tests/run.py` builds the compiler, runs all golden tests
-(`tests/golden/`) and type checks the examples.
+(`tests/golden/`, their packages come from `tests/nice.toml`) and type
+checks the examples.
 `python3 tests/fuzz.py diff 100` compares random programs against a Python
 model of the same semantics, `python3 tests/fuzz.py syntax 300` mutates the
 test programs and checks that the compiler never crashes.
@@ -107,6 +143,7 @@ output.
 | Values | `Int`, `Float` and `Bool` are plain C values (`int64_t`, `double`, `int`). `Option<T>` is unboxed too (a small struct, or a pointer that is NULL for `None`). Structs and enum variants are immutable records with native fields. |
 | Generics | Monomorphized: every generic function and type gets its own C code per concrete type. `largest<Int>` compares `int64_t` values, `Option<Int>` stores an `int64_t`, trait calls on type parameters are direct C calls. |
 | Python types | `lib/bindings.nice` declares types for a part of the stdlib. Other modules are `Dyn`. |
+| Toolchain | nicethon brings CPython and zig (as C compiler). Packages are declared in `nice.toml` and pinned in `nice.lock`, the project environment is managed by nicethon. |
 | Compiler | Rust, no dependencies. Prelude, bindings and C runtime are embedded in the binary. |
 
 ## Performance
@@ -138,7 +175,7 @@ because the time is spent inside the library.
  C codegen           src/codegen.rs               (one copy per generic instance, unboxed values,
      |                                             refcounting, boundary checks)
      |
- clang / gcc  ->  main.cpython-314-darwin.so  ->  imported by CPython
+ zig cc  ->  main.cpython-314-darwin.so  ->  imported by the project's CPython
 ```
 
 The generated C includes [runtime/nicethon.h](runtime/nicethon.h): records,
@@ -154,5 +191,9 @@ the native list type, boundary checks, coroutines and the intrinsics of the
   (`fn nest<T>(value: T) { nest([value]) }`) cannot be compiled to one copy
   per type and is rejected.
 - Reference cycles through Nicethon lists are not collected.
-- `build` produces one extension module, no wheel. Tested on macOS only.
+- `build` produces one extension module, no wheel.
+- Tested on macOS with python 3.12, 3.13 and 3.14. For Linux and Windows,
+  modules cross-compiled with zig link correctly, but have not run there yet.
+- `nice.lock` is resolved on one platform. A package that only another
+  platform needs indirectly is missing from it there.
 - Free-threaded CPython builds are not supported.

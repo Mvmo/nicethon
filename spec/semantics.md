@@ -450,8 +450,11 @@ recursive ones included.
 - A program (the entry file plus the Nicethon modules it imports) compiles
   to one C file and one CPython extension module, e.g.
   `geometry.cpython-314-darwin.so`. The module name is the entry file name.
-- The Python interpreter is a build input: the active virtualenv's python,
-  or `--python`. Include path and extension suffix come from its `sysconfig`.
+- The Python interpreter is a build input: the environment of the
+  project the file belongs to (its `nice.toml`, pinned by `nice.lock`), or
+  the default python for files outside a project. Include path and
+  extension suffix come from its `sysconfig`. The C compiler is `zig cc`.
+  nicethon downloads python and zig itself.
 - `nicethon run main.nice` compiles with `-O1`, starts that interpreter,
   imports the module and calls `main()`. `--release` uses `-O2`.
 - Target: CPython 3.12 and newer, full C API.
