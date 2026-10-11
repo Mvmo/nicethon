@@ -169,7 +169,8 @@ pub fn compile(python: &Path, c_path: &Path, module: &str, release: bool) -> Res
     let out_dir = c_path.parent().unwrap();
     let output = out_dir.join(format!("{module}{suffix}"));
     let mut zig = Command::new(zig()?);
-    zig.args(["cc", "-shared", "-w", "-std=c11", if release { "-O2" } else { "-O1" }]);
+    // No fused multiply-add: python rounds after every float operation.
+    zig.args(["cc", "-shared", "-w", "-std=c11", "-ffp-contract=off", if release { "-O2" } else { "-O1" }]);
     zig.arg(format!("-I{include}")).arg(format!("-I{}", out_dir.display()));
     match std::env::consts::OS {
         // Python symbols resolve when the interpreter loads the module.

@@ -1,6 +1,7 @@
-// Regressions found by tests/fuzz.py: float ~/ and % follow Python exactly
-// (signed zeros included), expected types flow into calls and operators,
-// and as fills in a type that is still open.
+// Regressions, mostly found by tests/fuzz.py: float ~/ and % follow Python
+// exactly (signed zeros included), a * b + c rounds twice like Python instead
+// of using a fused multiply-add, expected types flow into calls and
+// operators, and as fills in a type that is still open.
 import py * as io from "io";
 
 fn first_word(text: Str) -> Str {
@@ -9,7 +10,12 @@ fn first_word(text: Str) -> Str {
     }
 }
 
+fn multiply_add(factor: Float, value: Float, offset: Float) -> Float {
+    factor * value + offset
+}
+
 fn main() {
+    print(multiply_add(0.1, 10.0, -1.0));
     print(-4.0 % 2.0);
     print(4.0 % -2.0);
     print(-0.0 ~/ 1.0);
